@@ -277,22 +277,26 @@ fn is_xml_name(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Unique per call so parallel tests never share a directory.
+    /// Wall-clock nanos alone collide on macOS (coarse clock + cargo test threads).
     fn temp_path() -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("omt-cfg-{}-{n}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = std::env::temp_dir().join(format!("omt-cfg-{}-{n}-{seq}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp settings dir");
         dir.join("settings.xml")
     }
 
     fn cleanup(path: &Path) {
-        let _ = fs::remove_file(path);
         if let Some(dir) = path.parent() {
-            let _ = fs::remove_dir(dir);
+            let _ = fs::remove_dir_all(dir);
         }
     }
 

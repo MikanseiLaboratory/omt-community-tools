@@ -5170,7 +5170,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-bench"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6064,7 +6064,7 @@ dependencies = [
 
 [[package]]
 name = "omt-config-manager"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6075,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "omt-discovery-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6088,7 +6088,7 @@ dependencies = [
 
 [[package]]
 name = "omt-launcher"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6103,7 +6103,7 @@ dependencies = [
 
 [[package]]
 name = "omt-media"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -6118,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "omt-studio-monitor"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6132,7 +6132,7 @@ dependencies = [
 
 [[package]]
 name = "omt-test-patterns"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6371,7 +6371,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-generator"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
  "omt-media",
@@ -8442,7 +8442,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suite-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",

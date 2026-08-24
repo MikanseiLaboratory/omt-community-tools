@@ -24,6 +24,12 @@ jobs:
           - platform: 'windows-latest'
             rust_target: 'x86_64-pc-windows-msvc'
             args: '--target x86_64-pc-windows-msvc --bundles msi,nsis'
+          - platform: 'ubuntu-22.04'
+            rust_target: 'x86_64-unknown-linux-gnu'
+            args: '--target x86_64-unknown-linux-gnu --bundles deb,appimage'
+          - platform: 'ubuntu-22.04-arm'
+            rust_target: 'aarch64-unknown-linux-gnu'
+            args: '--target aarch64-unknown-linux-gnu --bundles deb,appimage'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -41,6 +47,10 @@ jobs:
         with:
           bun-version: '1.2.19'
 
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: bash ./scripts/ci/install-linux-deps.sh
+
       - name: Build sidecar tools
         run: cargo build --release --target ${{ matrix.rust_target }} -p omt-studio-monitor -p omt-test-patterns -p omt-config-manager -p omt-discovery-server
 
@@ -49,8 +59,8 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-sidecars.ps1 -Target ${{ matrix.rust_target }}
 
-      - name: Prepare sidecars (macOS)
-        if: runner.os == 'macOS'
+      - name: Prepare sidecars (Unix)
+        if: runner.os != 'Windows'
         run: bash ./scripts/prepare-sidecars.sh ${{ matrix.rust_target }}
 
       - name: Install frontend dependencies
@@ -89,11 +99,15 @@ jobs:
             - **Windows**: `.msi` (WiX) or `-setup.exe` (NSIS)
             - **macOS (Apple Silicon)**: `.dmg` for `aarch64-apple-darwin`
             - **macOS (Intel)**: `.dmg` for `x86_64-apple-darwin`
+            - **Linux x64**: `.deb` or `.AppImage` for `x86_64-unknown-linux-gnu`
+            - **Linux Arm64**: `.deb` or `.AppImage` for `aarch64-unknown-linux-gnu`
 
             ## Suite contents
             The installer includes the launcher plus sidecar tools:
             - Studio Monitor
             - Test Patterns
+            - Config Manager
+            - Discovery Server
 
             See the assets below to download and install this version.
           releaseDraft: false
