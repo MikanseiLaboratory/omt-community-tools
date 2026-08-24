@@ -34,6 +34,7 @@ if [[ "$mode" == "tauri" ]]; then
     patchelf
     libxdo-dev
     libfuse2
+    xdg-utils
   )
 elif [[ "$mode" != "tools" ]]; then
   echo "usage: $0 [tools|tauri]" >&2
