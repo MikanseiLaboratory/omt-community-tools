@@ -207,8 +207,27 @@ fn native_menu<R: tauri::Runtime>(
     }
 }
 
+/// WebKitGTK DMA-BUF compositing can scramble the window on Raspberry Pi OS
+/// (and some other Mesa stacks). Safe to set on other Linux GPUs when unset.
+fn apply_linux_webview_env() {
+    #[cfg(target_os = "linux")]
+    {
+        const KEYS: &[(&str, &str)] = &[
+            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+            ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
+        ];
+        for (key, value) in KEYS {
+            if std::env::var_os(key).is_none() {
+                // SAFETY: called from `run()` before the webview or worker threads start.
+                unsafe { std::env::set_var(key, value) };
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    apply_linux_webview_env();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
