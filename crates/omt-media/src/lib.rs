@@ -19,7 +19,8 @@ pub use color::{rgb_to_uyvy_pixel, uyvy_from_rgb_frame};
 pub use discovery::{DiscoveredSource, SourceBrowser, discover_sources, spawn_discover};
 pub use playout::{BufferSettings, BufferUnit, DelaySetting};
 pub use receive::{
-    ConnectOptions, LatestVideo, MetadataLogEntry, ReceiveCounters, ReceiveWorker, VideoFrame,
+    ConnectOptions, LatestVideo, MetadataLogEntry, ReceiveCounters, ReceiveWorker, VideoDecodePath,
+    VideoFrame,
 };
 pub use send::{
     AudioToneConfig, DEFAULT_VIDEO_FRAME_BUFFER_FRAMES, MAX_VIDEO_FRAME_BUFFER_FRAMES,
