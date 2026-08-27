@@ -213,20 +213,11 @@ impl Default for Playout {
 }
 
 /// Reusable `Bgra8Unorm` textures so playout does not hold vmx's RING=3 output.
+#[derive(Default)]
 struct GpuCopyPool {
     width: u32,
     height: u32,
     free: Vec<wgpu::Texture>,
-}
-
-impl Default for GpuCopyPool {
-    fn default() -> Self {
-        Self {
-            width: 0,
-            height: 0,
-            free: Vec::new(),
-        }
-    }
 }
 
 impl GpuCopyPool {
