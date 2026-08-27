@@ -11,8 +11,7 @@ use anyhow::Result;
 use eframe::egui::{self, Context, Pos2, TextureHandle, TextureOptions};
 use omt_media::{
     AudioLevels, AudioOutputDevice, AudioOutputStatus, BufferUnit, ConnectOptions, DelaySetting,
-    DiscoveredSource, ReceiveWorker, SessionState, StallState, VideoDecodePath,
-    list_output_devices, spawn_discover,
+    DiscoveredSource, ReceiveWorker, SessionState, StallState, list_output_devices, spawn_discover,
 };
 use suite_core::{
     Language, SUITE_VERSION, SimdCapabilities, StudioMonitorConfig, ThemePreference,
@@ -23,7 +22,7 @@ use suite_core::{
 use crate::chrome::UiChrome;
 use crate::frame_prep::{FramePrep, PrepControl, PreparedFrame};
 use crate::preferences::{self, BufferEditState, PrefsAction};
-use crate::settings::{self, MonitorSettings};
+use crate::settings::MonitorSettings;
 
 type DiscoveryResult = Result<Vec<DiscoveredSource>, String>;
 
@@ -126,8 +125,6 @@ struct MonitorApp {
     reconnects: u64,
     wire_queue_depth: u32,
     session_state: SessionState,
-    /// Decode backend reported by the receive worker (`None` while idle).
-    active_video_decode: Option<VideoDecodePath>,
     pan_x: f32,
     pan_y: f32,
     pan_drag: Option<Pos2>,
@@ -154,21 +151,12 @@ impl MonitorApp {
         theme: ThemePreference,
         initial_url: Option<String>,
     ) -> Self {
-        let layout = load_studio_monitor_config().unwrap_or_default();
         let worker = ReceiveWorker::spawn();
-        let mut settings = MonitorSettings::default();
-        settings.video_decode = settings::decode_path_from_config(layout.video_decode);
+        let settings = MonitorSettings::default();
         worker.set_buffer(settings.buffer);
         worker.set_audio_boost_db(settings.audio_boost_db);
         if let Some(url) = &initial_url {
-            let (quality, preview) = settings.quality.to_connect_parts();
-            worker.connect_with(ConnectOptions {
-                url: url.clone(),
-                addresses: Vec::new(),
-                quality,
-                preview,
-                video_decode: settings.video_decode,
-            });
+            worker.connect(url.clone());
         }
 
         let prep_ctrl = PrepControl::new();
@@ -181,6 +169,7 @@ impl MonitorApp {
 
         let suite_version = std::env::var(suite_core::env::SUITE_VERSION)
             .unwrap_or_else(|_| SUITE_VERSION.to_string());
+        let layout = load_studio_monitor_config().unwrap_or_default();
 
         let system_dark = matches!(ctx.system_theme(), Some(egui::Theme::Dark));
         let chrome = UiChrome::resolve(theme, system_dark);
@@ -234,7 +223,6 @@ impl MonitorApp {
             reconnects: 0,
             wire_queue_depth: 0,
             session_state: SessionState::Stopped,
-            active_video_decode: None,
             pan_x: 0.0,
             pan_y: 0.0,
             pan_drag: None,
@@ -384,7 +372,6 @@ impl MonitorApp {
             let audio_buffer_delay_ms = *self.worker.latest().audio_buffer_delay_ms.lock();
             let stats = *self.worker.latest().stats.lock();
             let session_state = *self.worker.latest().session_state.lock();
-            let video_decode = *self.worker.latest().video_decode.lock();
 
             self.frames_decoded = counters.frames_decoded;
             self.source_dropped = counters.frames_replaced;
@@ -393,7 +380,6 @@ impl MonitorApp {
             self.video_buffer_delay_ms = video_buffer_delay_ms;
             self.audio_buffer_delay_ms = audio_buffer_delay_ms;
             self.session_state = session_state;
-            self.active_video_decode = video_decode;
             if self.settings.buffer.linked {
                 let (fps_n, fps_d) = self.buffer_fps();
                 let before = self.settings.buffer;
@@ -484,7 +470,6 @@ impl MonitorApp {
             addresses,
             quality,
             preview,
-            video_decode: self.settings.video_decode,
         });
     }
 
@@ -521,7 +506,6 @@ impl MonitorApp {
         self.reconnects = 0;
         self.wire_queue_depth = 0;
         self.session_state = SessionState::Connecting;
-        self.active_video_decode = None;
         self.zoom = 1.0;
         self.pan_x = 0.0;
         self.pan_y = 0.0;
@@ -725,13 +709,6 @@ impl MonitorApp {
                 self.settings.quality = preset;
                 self.reapply_connection();
             }
-            PrefsAction::SetVideoDecode(path) => {
-                if self.settings.video_decode != path {
-                    self.settings.video_decode = path;
-                    self.persist_monitor_layout();
-                    self.reapply_connection();
-                }
-            }
             PrefsAction::SetAlpha(v) => {
                 self.settings.show_alpha = v;
                 self.prep_ctrl.set_alpha(v);
@@ -780,7 +757,6 @@ impl MonitorApp {
             stats_video_open: self.stats_video_open,
             stats_audio_open: self.stats_audio_open,
             stats_source_open: self.stats_source_open,
-            video_decode: settings::decode_path_to_config(self.settings.video_decode),
         };
         let _ = save_studio_monitor_config(&cfg);
     }
@@ -828,7 +804,6 @@ impl eframe::App for MonitorApp {
                 &self.audio_devices,
                 self.audio_output_device.as_deref(),
                 self.audio_unavailable(),
-                self.worker.gpu_available(),
                 self.settings.buffer,
                 self.video_buffer_delay_ms,
                 self.audio_buffer_delay_ms,

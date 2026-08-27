@@ -426,22 +426,6 @@ impl MonitorApp {
                             stat_row(
                                 ui,
                                 chrome,
-                                t(self.language, "monitor.decode"),
-                                match self
-                                    .active_video_decode
-                                    .unwrap_or(self.settings.video_decode)
-                                {
-                                    omt_media::VideoDecodePath::Cpu => {
-                                        t(self.language, "monitor.decode_cpu").to_string()
-                                    }
-                                    omt_media::VideoDecodePath::Gpu => {
-                                        t(self.language, "monitor.decode_gpu").to_string()
-                                    }
-                                },
-                            );
-                            stat_row(
-                                ui,
-                                chrome,
                                 "Wire queue",
                                 format!("{}", self.wire_queue_depth),
                             );

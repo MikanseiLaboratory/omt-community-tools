@@ -180,17 +180,6 @@ impl TestPatternsConfig {
     }
 }
 
-/// VMX video decode backend stored in Studio Monitor preferences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum VideoDecodePath {
-    /// SIMD CPU decode to BGRA.
-    #[default]
-    Cpu,
-    /// GPU IDCT + color convert (read back to BGRA for the UI).
-    Gpu,
-}
-
 /// Studio Monitor tool preferences (`studio-monitor.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -215,9 +204,6 @@ pub struct StudioMonitorConfig {
     /// Whether the source-info group is expanded.
     #[serde(default = "default_true")]
     pub stats_source_open: bool,
-    /// VMX decode backend (`cpu` or `gpu`).
-    #[serde(default)]
-    pub video_decode: VideoDecodePath,
 }
 
 impl Default for StudioMonitorConfig {
@@ -230,7 +216,6 @@ impl Default for StudioMonitorConfig {
             stats_video_open: true,
             stats_audio_open: true,
             stats_source_open: true,
-            video_decode: VideoDecodePath::Cpu,
         }
     }
 }
@@ -483,7 +468,6 @@ mod tests {
         assert!(parsed.stats_video_open);
         assert!(parsed.stats_audio_open);
         assert!(parsed.stats_source_open);
-        assert_eq!(parsed.video_decode, VideoDecodePath::Cpu);
     }
 
     #[test]

@@ -35,8 +35,6 @@ pub struct MonitorSettings {
     pub safe_area: bool,
     pub vu_meter: bool,
     pub quality: VideoQualityPreset,
-    /// VMX decode backend (CPU SIMD vs wgpu).
-    pub video_decode: omt_media::VideoDecodePath,
     pub audio_boost_db: i32,
     /// Linked or independent A/V playout buffers (PTS gate).
     pub buffer: BufferSettings,
@@ -49,23 +47,8 @@ impl Default for MonitorSettings {
             safe_area: false,
             vu_meter: true,
             quality: VideoQualityPreset::Default,
-            video_decode: omt_media::VideoDecodePath::Cpu,
             audio_boost_db: 0,
             buffer: BufferSettings::default(),
         }
-    }
-}
-
-pub fn decode_path_from_config(path: suite_core::VideoDecodePath) -> omt_media::VideoDecodePath {
-    match path {
-        suite_core::VideoDecodePath::Cpu => omt_media::VideoDecodePath::Cpu,
-        suite_core::VideoDecodePath::Gpu => omt_media::VideoDecodePath::Gpu,
-    }
-}
-
-pub fn decode_path_to_config(path: omt_media::VideoDecodePath) -> suite_core::VideoDecodePath {
-    match path {
-        omt_media::VideoDecodePath::Cpu => suite_core::VideoDecodePath::Cpu,
-        omt_media::VideoDecodePath::Gpu => suite_core::VideoDecodePath::Gpu,
     }
 }
