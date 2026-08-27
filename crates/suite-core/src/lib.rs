@@ -13,7 +13,7 @@ mod version;
 
 pub use config::{
     DiscoveryServerConfig, LauncherConfig, StudioMonitorConfig, SuiteConfig, TestPatternsConfig,
-    TestPatternsQuality, app_config_path, config_dir, config_path, load_config,
+    TestPatternsQuality, VideoDecodePath, app_config_path, config_dir, config_path, load_config,
     load_discovery_server_config, load_launcher_config, load_studio_monitor_config,
     load_test_patterns_config, save_config, save_discovery_server_config, save_launcher_config,
     save_studio_monitor_config, save_test_patterns_config,
