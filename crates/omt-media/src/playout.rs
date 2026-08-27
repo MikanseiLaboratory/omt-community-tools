@@ -9,11 +9,14 @@ use std::time::Instant;
 
 use crate::audio_out::AudioOutput;
 use crate::receive::{LatestVideo, VideoFrame};
+use openmediatransport::{DecodedVideoGpuFrame, GpuVideoContext};
 
 const TICKS_PER_SECOND: f64 = 10_000_000.0;
 const TICKS_PER_MS: i64 = 10_000;
 const VIDEO_Q_CAP: usize = 8;
 const AUDIO_Q_CAP: usize = 48;
+/// Owned GPU copies: playout depth plus one in-flight ingest and one held by the UI.
+const GPU_TEX_POOL: usize = VIDEO_Q_CAP + 2;
 /// Soft resync when oldest queued PTS is this late vs the media clock.
 const RESNAP_MIN_LATE_MS: i64 = 1_500;
 /// Never hard-snap unless at least this late (prefer soft catch-up).
@@ -158,6 +161,27 @@ struct PendingAudio {
     sample_rate: i32,
 }
 
+enum QueuedVideo {
+    Cpu(VideoFrame),
+    Gpu(DecodedVideoGpuFrame),
+}
+
+impl QueuedVideo {
+    fn timestamp(&self) -> i64 {
+        match self {
+            Self::Cpu(v) => v.timestamp,
+            Self::Gpu(v) => v.timestamp,
+        }
+    }
+
+    fn fps(&self) -> (i32, i32) {
+        match self {
+            Self::Cpu(v) => (v.fps_n, v.fps_d.max(1)),
+            Self::Gpu(v) => (v.frame_rate_n, v.frame_rate_d.max(1)),
+        }
+    }
+}
+
 /// Shared media-clock gate for video + audio packets.
 pub struct Playout {
     settings: BufferSettings,
@@ -167,8 +191,9 @@ pub struct Playout {
     clock_skew_ticks: i64,
     fps_n: i32,
     fps_d: i32,
-    video_q: VecDeque<VideoFrame>,
+    video_q: VecDeque<QueuedVideo>,
     audio_q: VecDeque<PendingAudio>,
+    gpu_pool: GpuCopyPool,
 }
 
 impl Default for Playout {
@@ -182,8 +207,103 @@ impl Default for Playout {
             fps_d: 1,
             video_q: VecDeque::new(),
             audio_q: VecDeque::new(),
+            gpu_pool: GpuCopyPool::default(),
         }
     }
+}
+
+/// Reusable `Bgra8Unorm` textures so playout does not hold vmx's RING=3 output.
+struct GpuCopyPool {
+    width: u32,
+    height: u32,
+    free: Vec<wgpu::Texture>,
+}
+
+impl Default for GpuCopyPool {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            free: Vec::new(),
+        }
+    }
+}
+
+impl GpuCopyPool {
+    fn acquire(&mut self, device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+        if self.width != width || self.height != height {
+            self.free.clear();
+            self.width = width;
+            self.height = height;
+        }
+        self.free.pop().unwrap_or_else(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("omt-playout-gpu"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        })
+    }
+
+    fn release(&mut self, tex: wgpu::Texture) {
+        let size = tex.size();
+        if size.width != self.width || size.height != self.height {
+            return;
+        }
+        if self.free.len() < GPU_TEX_POOL {
+            self.free.push(tex);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.free.clear();
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+fn copy_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Texture,
+    dst: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) {
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("omt-gpu-ingest-copy"),
+    });
+    enc.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: src,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: dst,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(enc.finish()));
 }
 
 impl Playout {
@@ -207,24 +327,66 @@ impl Playout {
         self.pts_origin = None;
         self.wall_origin = None;
         self.clock_skew_ticks = 0;
-        self.video_q.clear();
+        while let Some(frame) = self.video_q.pop_front() {
+            self.recycle_queued(frame);
+        }
         self.audio_q.clear();
+        self.gpu_pool.clear();
+    }
+
+    /// GPU-copy a vmx ring texture into a playout-owned slot (no CPU wait).
+    pub(crate) fn copy_gpu_frame(
+        &mut self,
+        ctx: &GpuVideoContext,
+        mut frame: DecodedVideoGpuFrame,
+    ) -> DecodedVideoGpuFrame {
+        let dst = self
+            .gpu_pool
+            .acquire(&ctx.device, frame.width, frame.height);
+        copy_texture(
+            &ctx.device,
+            &ctx.queue,
+            &frame.texture,
+            &dst,
+            frame.width,
+            frame.height,
+        );
+        frame.texture = dst;
+        frame
+    }
+
+    fn recycle_queued(&mut self, frame: QueuedVideo) {
+        if let QueuedVideo::Gpu(gpu) = frame {
+            self.gpu_pool.release(gpu.texture);
+        }
     }
 
     /// Enqueue a decoded video frame.
     pub fn push_video(&mut self, frame: VideoFrame) {
-        if frame.fps_n > 0 {
-            let changed = self.fps_n != frame.fps_n || self.fps_d != frame.fps_d.max(1);
-            self.fps_n = frame.fps_n;
-            self.fps_d = frame.fps_d.max(1);
+        self.push_queued(QueuedVideo::Cpu(frame));
+    }
+
+    /// Enqueue a GPU-decoded texture frame (same PTS gate as CPU).
+    pub fn push_gpu_video(&mut self, frame: DecodedVideoGpuFrame) {
+        self.push_queued(QueuedVideo::Gpu(frame));
+    }
+
+    fn push_queued(&mut self, frame: QueuedVideo) {
+        let (fps_n, fps_d) = frame.fps();
+        if fps_n > 0 {
+            let changed = self.fps_n != fps_n || self.fps_d != fps_d;
+            self.fps_n = fps_n;
+            self.fps_d = fps_d;
             if changed {
                 self.settings.resync_linked(self.fps_n, self.fps_d);
             }
         }
-        self.note_clock(frame.timestamp);
+        self.note_clock(frame.timestamp());
         self.video_q.push_back(frame);
         while self.video_q.len() > VIDEO_Q_CAP {
-            self.video_q.pop_front();
+            if let Some(old) = self.video_q.pop_front() {
+                self.recycle_queued(old);
+            }
         }
     }
 
@@ -294,22 +456,23 @@ impl Playout {
         let Some(front) = self.video_q.front() else {
             return;
         };
-        if front.timestamp > video_mt {
+        if front.timestamp() > video_mt {
             return;
         }
 
-        let mut due: Option<VideoFrame> = None;
+        let mut due: Option<QueuedVideo> = None;
         let mut replaced = 0u64;
 
-        if front.timestamp < late_thresh {
+        if front.timestamp() < late_thresh {
             // Badly behind: keep the newest due frame only.
             while self
                 .video_q
                 .front()
-                .is_some_and(|f| f.timestamp <= video_mt)
+                .is_some_and(|f| f.timestamp() <= video_mt)
             {
-                if due.is_some() {
+                if let Some(old) = due.take() {
                     replaced += 1;
+                    self.recycle_queued(old);
                 }
                 due = self.video_q.pop_front();
             }
@@ -319,8 +482,10 @@ impl Playout {
             due = self.video_q.pop_front();
         }
 
-        if let Some(video) = due {
-            latest.publish_video(video, replaced);
+        match due {
+            Some(QueuedVideo::Cpu(video)) => latest.publish_video(video, replaced),
+            Some(QueuedVideo::Gpu(video)) => latest.publish_gpu_video(video, replaced),
+            None => {}
         }
     }
 
@@ -391,8 +556,8 @@ impl Playout {
             return;
         };
         let oldest = match (self.video_q.front(), self.audio_q.front()) {
-            (Some(v), Some(a)) => Some(v.timestamp.min(a.timestamp)),
-            (Some(v), None) => Some(v.timestamp),
+            (Some(v), Some(a)) => Some(v.timestamp().min(a.timestamp)),
+            (Some(v), None) => Some(v.timestamp()),
             (None, Some(a)) => Some(a.timestamp),
             (None, None) => None,
         };

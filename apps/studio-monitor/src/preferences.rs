@@ -58,6 +58,7 @@ pub enum PrefsAction {
     SetBufferLink(bool),
     SetBoost(i32),
     SetQuality(VideoQualityPreset),
+    SetVideoDecode(omt_media::VideoDecodePath),
     SetAlpha(bool),
     SetSafeArea(bool),
     SetVu(bool),
@@ -79,6 +80,7 @@ pub fn show(
     audio_devices: &[AudioOutputDevice],
     selected_audio: Option<&str>,
     audio_unavailable: bool,
+    gpu_available: Option<bool>,
     buffer: BufferSettings,
     video_delay_ms: u32,
     audio_delay_ms: u32,
@@ -183,6 +185,42 @@ pub fn show(
                             }
                         }
                     });
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(t(language, "monitor.decode"))
+                            .small()
+                            .color(chrome.text_muted),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if chip_button(
+                            ui,
+                            chrome,
+                            t(language, "monitor.decode_cpu"),
+                            settings.video_decode == omt_media::VideoDecodePath::Cpu,
+                        ) {
+                            action =
+                                Some(PrefsAction::SetVideoDecode(omt_media::VideoDecodePath::Cpu));
+                        }
+                        if chip_button(
+                            ui,
+                            chrome,
+                            t(language, "monitor.decode_gpu"),
+                            settings.video_decode == omt_media::VideoDecodePath::Gpu,
+                        ) {
+                            action =
+                                Some(PrefsAction::SetVideoDecode(omt_media::VideoDecodePath::Gpu));
+                        }
+                    });
+                    if settings.video_decode == omt_media::VideoDecodePath::Gpu
+                        && gpu_available == Some(false)
+                    {
+                        ui.label(
+                            RichText::new(t(language, "monitor.decode_gpu_unavailable"))
+                                .small()
+                                .color(chrome.text_muted),
+                        );
+                    }
 
                     ui.add_space(12.0);
                     section_title(ui, chrome, t(language, "monitor.overlay"));

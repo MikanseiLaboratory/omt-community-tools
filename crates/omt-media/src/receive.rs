@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openmediatransport::{
-    FrameType, OmtError, Quality, ReceiverConfig, ReceiverSession, SessionState, SessionStatistics,
+    DecodedVideoGpuFrame, FrameType, GpuVideoContext, OmtError, Quality, ReceiverConfig,
+    ReceiverSession, SessionState, SessionStatistics,
 };
 use parking_lot::{Condvar, Mutex};
 use tokio::sync::mpsc;
@@ -28,6 +29,19 @@ pub struct ConnectOptions {
     pub quality: Quality,
     /// Request 1/8 progressive Preview (`VideoFlags::PREVIEW` / low bandwidth).
     pub preview: bool,
+    /// VMX decode backend. [`VideoDecodePath::Gpu`] uses the eframe wgpu
+    /// [`GpuVideoContext`] when one was supplied; otherwise CPU decode is used.
+    pub video_decode: VideoDecodePath,
+}
+
+/// Where VMX video is decoded after the bitstream arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoDecodePath {
+    /// SIMD CPU decode to BGRA (default, always available).
+    #[default]
+    Cpu,
+    /// GPU IDCT + color convert on the caller's eframe wgpu device.
+    Gpu,
 }
 
 impl ConnectOptions {
@@ -38,6 +52,7 @@ impl ConnectOptions {
             addresses: Vec::new(),
             quality: Quality::Default,
             preview: false,
+            video_decode: VideoDecodePath::Cpu,
         }
     }
 }
@@ -107,6 +122,10 @@ pub struct LatestVideo {
     pub error: Mutex<Option<String>>,
     /// Connected URL.
     pub url: Mutex<Option<String>>,
+    /// Decode backend actually used by the current session (`None` when idle).
+    pub video_decode: Mutex<Option<VideoDecodePath>>,
+    /// Newest GPU-decoded frame (latest-wins; UI binds the texture).
+    pub gpu_frame: Mutex<Option<DecodedVideoGpuFrame>>,
 }
 
 impl Default for LatestVideo {
@@ -123,6 +142,8 @@ impl Default for LatestVideo {
             metadata_log: Mutex::new(VecDeque::new()),
             error: Mutex::new(None),
             url: Mutex::new(None),
+            video_decode: Mutex::new(None),
+            gpu_frame: Mutex::new(None),
         }
     }
 }
@@ -150,6 +171,7 @@ impl LatestVideo {
 
     /// Replace the latest video slot and wake waiters.
     pub fn publish_video(&self, video: VideoFrame, replaced_extra: u64) {
+        *self.gpu_frame.lock() = None;
         let mut slot = self.frame.lock();
         let mut counters = self.counters.lock();
         if slot.is_some() {
@@ -163,9 +185,28 @@ impl LatestVideo {
         self.frame_cv.notify_all();
     }
 
+    /// Publish a GPU-decoded texture for the UI (does not wake the CPU prep thread).
+    pub fn publish_gpu_video(&self, frame: DecodedVideoGpuFrame, replaced_extra: u64) {
+        *self.frame.lock() = None;
+        let mut slot = self.gpu_frame.lock();
+        let mut counters = self.counters.lock();
+        if slot.is_some() {
+            counters.frames_replaced = counters.frames_replaced.saturating_add(1);
+        }
+        counters.frames_replaced = counters.frames_replaced.saturating_add(replaced_extra);
+        *slot = Some(frame);
+        counters.frames_decoded = counters.frames_decoded.saturating_add(1);
+    }
+
+    /// Take the newest GPU frame if present.
+    pub fn take_gpu(&self) -> Option<DecodedVideoGpuFrame> {
+        self.gpu_frame.lock().take()
+    }
+
     /// Clear the frame slot and wake waiters (disconnect / teardown).
     pub fn clear_video(&self) {
         *self.frame.lock() = None;
+        *self.gpu_frame.lock() = None;
         self.frame_cv.notify_all();
     }
 
@@ -204,6 +245,7 @@ pub struct ReceiveWorker {
     latest: Arc<LatestVideo>,
     stall: Arc<Mutex<StallDetector>>,
     audio: Arc<AudioOutput>,
+    gpu: Arc<Mutex<Option<GpuVideoContext>>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -214,12 +256,14 @@ impl ReceiveWorker {
         let latest = Arc::new(LatestVideo::default());
         let stall = Arc::new(Mutex::new(StallDetector::default()));
         let audio = Arc::new(AudioOutput::new());
+        let gpu = Arc::new(Mutex::new(None));
         let latest_c = Arc::clone(&latest);
         let stall_c = Arc::clone(&stall);
         let audio_c = Arc::clone(&audio);
+        let gpu_c = Arc::clone(&gpu);
 
         let join = runtime::spawn(async move {
-            worker_loop(rx, latest_c, stall_c, audio_c).await;
+            worker_loop(rx, latest_c, stall_c, audio_c, gpu_c).await;
         });
 
         Self {
@@ -227,6 +271,7 @@ impl ReceiveWorker {
             latest,
             stall,
             audio,
+            gpu,
             join: Some(join),
         }
     }
@@ -244,6 +289,16 @@ impl ReceiveWorker {
     /// Shared audio output (levels / boost).
     pub fn audio(&self) -> Arc<AudioOutput> {
         Arc::clone(&self.audio)
+    }
+
+    /// Supply the eframe wgpu device/queue used for [`VideoDecodePath::Gpu`].
+    pub fn set_gpu(&self, gpu: Option<GpuVideoContext>) {
+        *self.gpu.lock() = gpu;
+    }
+
+    /// Whether [`Self::set_gpu`] received an eframe wgpu device.
+    pub fn gpu_available(&self) -> Option<bool> {
+        Some(self.gpu.lock().is_some())
     }
 
     /// Set playback boost in dB.
@@ -327,9 +382,12 @@ async fn worker_loop(
     latest: Arc<LatestVideo>,
     stall: Arc<Mutex<StallDetector>>,
     audio: Arc<AudioOutput>,
+    gpu_slot: Arc<Mutex<Option<GpuVideoContext>>>,
 ) {
     let mut receiver: Option<ReceiverSession> = None;
     let mut playout = Playout::default();
+    let mut gpu_decode = false;
+    let mut gpu_ctx: Option<GpuVideoContext> = None;
     publish_buffer_delays(&latest, &playout);
 
     loop {
@@ -368,12 +426,28 @@ async fn worker_loop(
         }
         if pending_disconnect {
             apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
+            gpu_decode = false;
+            gpu_ctx = None;
         }
         if let Some(opts) = pending_connect {
-            apply_connect(opts, &mut receiver, &latest, &stall, &audio, &mut playout).await;
+            gpu_decode = apply_connect(
+                opts,
+                &mut receiver,
+                &latest,
+                &stall,
+                &audio,
+                &mut playout,
+                &gpu_slot,
+            )
+            .await;
+            gpu_ctx = if gpu_decode {
+                gpu_slot.lock().clone()
+            } else {
+                None
+            };
         }
 
-        let Some(recv) = receiver.as_ref() else {
+        if receiver.is_none() {
             match rx.recv().await {
                 Some(first) => {
                     let mut pending_connect: Option<ConnectOptions> = None;
@@ -405,29 +479,62 @@ async fn worker_loop(
                     }
                     if pending_disconnect {
                         apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
+                        gpu_decode = false;
+                        gpu_ctx = None;
                     }
                     if let Some(opts) = pending_connect {
-                        apply_connect(opts, &mut receiver, &latest, &stall, &audio, &mut playout)
-                            .await;
+                        gpu_decode = apply_connect(
+                            opts,
+                            &mut receiver,
+                            &latest,
+                            &stall,
+                            &audio,
+                            &mut playout,
+                            &gpu_slot,
+                        )
+                        .await;
+                        gpu_ctx = if gpu_decode {
+                            gpu_slot.lock().clone()
+                        } else {
+                            None
+                        };
                     }
                 }
                 None => return,
             }
             continue;
-        };
+        }
 
         // Wait briefly for video, then drain all ready A/V/metadata into playout.
         let mut got_any = false;
-        if let Some(frame) =
-            tokio::task::block_in_place(|| recv.recv_video_timeout(Duration::from_millis(5)))
-        {
-            ingest_video(&latest, &stall, &mut playout, frame);
-            got_any = true;
+        if gpu_decode {
+            if let Some(recv) = receiver.as_ref() {
+                if let Some(frame) = tokio::task::block_in_place(|| {
+                    recv.recv_video_gpu_timeout(Duration::from_millis(5))
+                }) {
+                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
+                    got_any = true;
+                }
+                while let Some(frame) = recv.try_recv_video_gpu() {
+                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
+                    got_any = true;
+                }
+            }
+        } else if let Some(recv) = receiver.as_ref() {
+            if let Some(frame) =
+                tokio::task::block_in_place(|| recv.recv_video_timeout(Duration::from_millis(5)))
+            {
+                ingest_video(&latest, &stall, &mut playout, frame);
+                got_any = true;
+            }
+            while let Some(frame) = recv.try_recv_video() {
+                ingest_video(&latest, &stall, &mut playout, frame);
+                got_any = true;
+            }
         }
-        while let Some(frame) = recv.try_recv_video() {
-            ingest_video(&latest, &stall, &mut playout, frame);
-            got_any = true;
-        }
+        let Some(recv) = receiver.as_ref() else {
+            continue;
+        };
         while let Some(packet) = recv.try_recv_audio() {
             playout.push_audio(
                 packet.timestamp,
@@ -491,6 +598,29 @@ fn ingest_video(
     playout.push_video(video);
 }
 
+fn ingest_gpu_video(
+    latest: &LatestVideo,
+    stall: &Mutex<StallDetector>,
+    gpu_ctx: Option<&GpuVideoContext>,
+    playout: &mut Playout,
+    frame: DecodedVideoGpuFrame,
+) {
+    if frame.width == 0 || frame.height == 0 {
+        return;
+    }
+    if let Some(meta) = frame.frame_metadata.as_ref().filter(|s| !s.is_empty()) {
+        push_log(latest, "frame-meta", meta.to_string());
+    }
+    stall
+        .lock()
+        .on_frame(frame.frame_rate_n, frame.frame_rate_d.max(1));
+    let frame = match gpu_ctx {
+        Some(ctx) => playout.copy_gpu_frame(ctx, frame),
+        None => frame,
+    };
+    playout.push_gpu_video(frame);
+}
+
 fn take_bgra(frame: openmediatransport::DecodedVideoFrame) -> Arc<[u8]> {
     let w = frame.width as usize;
     let h = frame.height as usize;
@@ -528,7 +658,8 @@ async fn apply_connect(
     stall: &Mutex<StallDetector>,
     audio: &AudioOutput,
     playout: &mut Playout,
-) {
+    gpu_slot: &Mutex<Option<GpuVideoContext>>,
+) -> bool {
     *latest.error.lock() = None;
     // Tear down the previous session before clearing UI state so decode threads
     // cannot publish leftover frames into the new selection.
@@ -549,19 +680,48 @@ async fn apply_connect(
     publish_buffer_delays(latest, playout);
     stall.lock().reset();
     *latest.session_state.lock() = SessionState::Connecting;
+    *latest.video_decode.lock() = None;
     let url = opts.url.clone();
-    match open_receiver(opts).await {
+    let want_gpu = opts.video_decode == VideoDecodePath::Gpu;
+    let gpu = if want_gpu {
+        gpu_slot.lock().clone()
+    } else {
+        None
+    };
+    if want_gpu && gpu.is_none() {
+        push_log(
+            latest,
+            "info",
+            "eframe wgpu renderer unavailable; using CPU decode",
+        );
+    }
+    let gpu_active = gpu.is_some();
+    match open_receiver(opts, gpu.clone()).await {
         Ok(r) => {
             *latest.session_state.lock() = r.state();
             *latest.url.lock() = Some(url.clone());
             *receiver = Some(r);
-            push_log(latest, "info", format!("connected {url}"));
+            let path = if gpu_active {
+                VideoDecodePath::Gpu
+            } else {
+                VideoDecodePath::Cpu
+            };
+            *latest.video_decode.lock() = Some(path);
+            let path_label = if gpu_active { "GPU" } else { "CPU" };
+            push_log(
+                latest,
+                "info",
+                format!("connected {url} ({path_label} decode)"),
+            );
+            gpu_active
         }
         Err(e) => {
             *receiver = None;
             *latest.session_state.lock() = SessionState::Stopped;
+            *latest.video_decode.lock() = None;
             *latest.error.lock() = Some(e.to_string());
             push_log(latest, "error", e.to_string());
+            false
         }
     }
 }
@@ -578,6 +738,7 @@ fn apply_disconnect(
     }
     *latest.url.lock() = None;
     *latest.session_state.lock() = SessionState::Stopped;
+    *latest.video_decode.lock() = None;
     *latest.stats.lock() = SessionStatistics::default();
     latest.clear_video();
     *latest.audio_levels.lock() = AudioLevels::default();
@@ -587,7 +748,10 @@ fn apply_disconnect(
     push_log(latest, "info", "disconnected");
 }
 
-async fn open_receiver(opts: ConnectOptions) -> Result<ReceiverSession, OmtError> {
+async fn open_receiver(
+    opts: ConnectOptions,
+    gpu: Option<GpuVideoContext>,
+) -> Result<ReceiverSession, OmtError> {
     let url = opts.url.clone();
     let addresses = opts.addresses.clone();
     let quality = opts.quality;
@@ -599,6 +763,7 @@ async fn open_receiver(opts: ConnectOptions) -> Result<ReceiverSession, OmtError
             preview,
             connect_timeout: Duration::from_secs(5),
             auto_reconnect: true,
+            gpu,
         };
         ReceiverSession::connect_with_addresses(url, &addresses, config)
     })
