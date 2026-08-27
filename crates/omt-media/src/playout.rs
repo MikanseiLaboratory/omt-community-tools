@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::audio_out::AudioOutput;
 use crate::receive::{LatestVideo, VideoFrame};
+use openmediatransport::DecodedVideoGpuFrame;
 
 const TICKS_PER_SECOND: f64 = 10_000_000.0;
 const TICKS_PER_MS: i64 = 10_000;
@@ -158,6 +159,27 @@ struct PendingAudio {
     sample_rate: i32,
 }
 
+enum QueuedVideo {
+    Cpu(VideoFrame),
+    Gpu(DecodedVideoGpuFrame),
+}
+
+impl QueuedVideo {
+    fn timestamp(&self) -> i64 {
+        match self {
+            Self::Cpu(v) => v.timestamp,
+            Self::Gpu(v) => v.timestamp,
+        }
+    }
+
+    fn fps(&self) -> (i32, i32) {
+        match self {
+            Self::Cpu(v) => (v.fps_n, v.fps_d.max(1)),
+            Self::Gpu(v) => (v.frame_rate_n, v.frame_rate_d.max(1)),
+        }
+    }
+}
+
 /// Shared media-clock gate for video + audio packets.
 pub struct Playout {
     settings: BufferSettings,
@@ -167,7 +189,7 @@ pub struct Playout {
     clock_skew_ticks: i64,
     fps_n: i32,
     fps_d: i32,
-    video_q: VecDeque<VideoFrame>,
+    video_q: VecDeque<QueuedVideo>,
     audio_q: VecDeque<PendingAudio>,
 }
 
@@ -213,15 +235,25 @@ impl Playout {
 
     /// Enqueue a decoded video frame.
     pub fn push_video(&mut self, frame: VideoFrame) {
-        if frame.fps_n > 0 {
-            let changed = self.fps_n != frame.fps_n || self.fps_d != frame.fps_d.max(1);
-            self.fps_n = frame.fps_n;
-            self.fps_d = frame.fps_d.max(1);
+        self.push_queued(QueuedVideo::Cpu(frame));
+    }
+
+    /// Enqueue a GPU-decoded texture frame (same PTS gate as CPU).
+    pub fn push_gpu_video(&mut self, frame: DecodedVideoGpuFrame) {
+        self.push_queued(QueuedVideo::Gpu(frame));
+    }
+
+    fn push_queued(&mut self, frame: QueuedVideo) {
+        let (fps_n, fps_d) = frame.fps();
+        if fps_n > 0 {
+            let changed = self.fps_n != fps_n || self.fps_d != fps_d;
+            self.fps_n = fps_n;
+            self.fps_d = fps_d;
             if changed {
                 self.settings.resync_linked(self.fps_n, self.fps_d);
             }
         }
-        self.note_clock(frame.timestamp);
+        self.note_clock(frame.timestamp());
         self.video_q.push_back(frame);
         while self.video_q.len() > VIDEO_Q_CAP {
             self.video_q.pop_front();
@@ -294,19 +326,19 @@ impl Playout {
         let Some(front) = self.video_q.front() else {
             return;
         };
-        if front.timestamp > video_mt {
+        if front.timestamp() > video_mt {
             return;
         }
 
-        let mut due: Option<VideoFrame> = None;
+        let mut due: Option<QueuedVideo> = None;
         let mut replaced = 0u64;
 
-        if front.timestamp < late_thresh {
+        if front.timestamp() < late_thresh {
             // Badly behind: keep the newest due frame only.
             while self
                 .video_q
                 .front()
-                .is_some_and(|f| f.timestamp <= video_mt)
+                .is_some_and(|f| f.timestamp() <= video_mt)
             {
                 if due.is_some() {
                     replaced += 1;
@@ -319,8 +351,10 @@ impl Playout {
             due = self.video_q.pop_front();
         }
 
-        if let Some(video) = due {
-            latest.publish_video(video, replaced);
+        match due {
+            Some(QueuedVideo::Cpu(video)) => latest.publish_video(video, replaced),
+            Some(QueuedVideo::Gpu(video)) => latest.publish_gpu_video(video, replaced),
+            None => {}
         }
     }
 
@@ -391,8 +425,8 @@ impl Playout {
             return;
         };
         let oldest = match (self.video_q.front(), self.audio_q.front()) {
-            (Some(v), Some(a)) => Some(v.timestamp.min(a.timestamp)),
-            (Some(v), None) => Some(v.timestamp),
+            (Some(v), Some(a)) => Some(v.timestamp().min(a.timestamp)),
+            (Some(v), None) => Some(v.timestamp()),
             (None, Some(a)) => Some(a.timestamp),
             (None, None) => None,
         };

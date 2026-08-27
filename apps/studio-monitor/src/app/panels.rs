@@ -24,7 +24,7 @@ impl MonitorApp {
                     self.exit_fullscreen(ctx);
                 }
 
-                let has_frame = self.texture.is_some() && self.frame_w > 0 && self.frame_h > 0;
+                let has_frame = self.has_video();
                 if has_frame {
                     let (dw, dh) = self.fit_display_in_viewport(full.width(), full.height());
                     let video_rect = Rect::from_center_size(full.center(), Vec2::new(dw, dh));
@@ -164,7 +164,7 @@ impl MonitorApp {
             self.pan_drag = None;
         }
 
-        let has_frame = self.texture.is_some() && self.frame_w > 0 && self.frame_h > 0;
+        let has_frame = self.has_video();
         if has_frame {
             let (dw, dh) = self.display_size();
             let origin = content.min + Vec2::new(self.pan_x, self.pan_y);
@@ -330,7 +330,7 @@ impl MonitorApp {
     }
 
     fn paint_video_stack(&mut self, ui: &mut Ui, _chrome: UiChrome, video_rect: Rect, clip: Rect) {
-        let Some(tex) = &self.texture else {
+        let Some(tex_id) = self.video_texture_id() else {
             return;
         };
         if self.frame_w == 0 || self.frame_h == 0 {
@@ -338,7 +338,7 @@ impl MonitorApp {
         }
         let painter = ui.painter().with_clip_rect(clip);
         painter.image(
-            tex.id(),
+            tex_id,
             video_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,

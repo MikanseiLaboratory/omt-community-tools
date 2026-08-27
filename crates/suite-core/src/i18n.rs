@@ -252,10 +252,10 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::English, "monitor.decode_gpu") => "WGPU",
         (Language::Japanese, "monitor.decode_gpu") => "WGPU",
         (Language::English, "monitor.decode_gpu_unavailable") => {
-            "No GPU adapter — CPU decode is used"
+            "eframe wgpu renderer unavailable — CPU decode is used"
         }
         (Language::Japanese, "monitor.decode_gpu_unavailable") => {
-            "GPUアダプタが無いため CPU デコードを使います"
+            "eframe の wgpu レンダラが無いため CPU デコードを使います"
         }
         (Language::English, "monitor.safe_area") => "Safe areas",
         (Language::Japanese, "monitor.safe_area") => "セーフエリア",

@@ -187,7 +187,7 @@ pub enum VideoDecodePath {
     /// SIMD CPU decode to BGRA.
     #[default]
     Cpu,
-    /// GPU IDCT + color convert (read back to BGRA for the UI).
+    /// GPU IDCT + color convert on the eframe wgpu device.
     Gpu,
 }
 

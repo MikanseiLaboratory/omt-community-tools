@@ -8,10 +8,11 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use eframe::egui::{self, Context, Pos2, TextureHandle, TextureOptions};
+use eframe::egui::{self, Context, Pos2, TextureHandle, TextureId, TextureOptions};
+use eframe::egui_wgpu::{RenderState, WgpuSetup, wgpu};
 use omt_media::{
     AudioLevels, AudioOutputDevice, AudioOutputStatus, BufferUnit, ConnectOptions, DelaySetting,
-    DiscoveredSource, ReceiveWorker, SessionState, StallState, VideoDecodePath,
+    DiscoveredSource, GpuVideoContext, ReceiveWorker, SessionState, StallState, VideoDecodePath,
     list_output_devices, spawn_discover,
 };
 use suite_core::{
@@ -45,6 +46,24 @@ const TOOLBAR_H: f32 = 48.0;
 const ACTION_SAFE_FRAC: f32 = 0.93;
 const TITLE_SAFE_FRAC: f32 = 0.90;
 
+fn wgpu_options_with_bgra_storage() -> eframe::WgpuConfiguration {
+    let mut config = eframe::WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(create) = &mut config.wgpu_setup {
+        let inner = Arc::clone(&create.device_descriptor);
+        create.device_descriptor = Arc::new(move |adapter| {
+            let mut desc = inner(adapter);
+            if adapter
+                .features()
+                .contains(wgpu::Features::BGRA8UNORM_STORAGE)
+            {
+                desc.required_features |= wgpu::Features::BGRA8UNORM_STORAGE;
+            }
+            desc
+        });
+    }
+    config
+}
+
 /// Launch the egui Studio Monitor window.
 pub fn run_eframe(
     title: String,
@@ -57,6 +76,7 @@ pub fn run_eframe(
             .with_inner_size([1440.0, 860.0])
             .with_title(title.clone())
             .with_app_id(suite_core::ToolId::StudioMonitor.binary_name()),
+        wgpu_options: wgpu_options_with_bgra_storage(),
         ..Default::default()
     };
     eframe::run_native(
@@ -64,12 +84,7 @@ pub fn run_eframe(
         options,
         Box::new(move |cc| {
             install_egui_cjk_fonts(&cc.egui_ctx);
-            Ok(Box::new(MonitorApp::new(
-                &cc.egui_ctx,
-                language,
-                theme,
-                initial_url,
-            )))
+            Ok(Box::new(MonitorApp::new(cc, language, theme, initial_url)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
@@ -104,6 +119,9 @@ struct MonitorApp {
     window_fps_count: u32,
     window_fps_start: Instant,
     texture: Option<TextureHandle>,
+    native_video_id: Option<TextureId>,
+    held_gpu_texture: Option<wgpu::Texture>,
+    wgpu_state: Option<RenderState>,
     discovering: bool,
     discovery_rx: Option<Receiver<DiscoveryResult>>,
     refresh_silent: bool,
@@ -149,13 +167,20 @@ struct MonitorApp {
 
 impl MonitorApp {
     fn new(
-        ctx: &Context,
+        cc: &eframe::CreationContext<'_>,
         language: Language,
         theme: ThemePreference,
         initial_url: Option<String>,
     ) -> Self {
+        let ctx = &cc.egui_ctx;
         let layout = load_studio_monitor_config().unwrap_or_default();
+        let wgpu_state = cc.wgpu_render_state.clone();
+        let gpu = wgpu_state.as_ref().map(|state| GpuVideoContext {
+            device: Arc::new(state.device.clone()),
+            queue: Arc::new(state.queue.clone()),
+        });
         let worker = ReceiveWorker::spawn();
+        worker.set_gpu(gpu);
         let mut settings = MonitorSettings::default();
         settings.video_decode = settings::decode_path_from_config(layout.video_decode);
         worker.set_buffer(settings.buffer);
@@ -212,6 +237,9 @@ impl MonitorApp {
             window_fps_count: 0,
             window_fps_start: Instant::now(),
             texture: None,
+            native_video_id: None,
+            held_gpu_texture: None,
+            wgpu_state,
             discovering: false,
             discovery_rx: None,
             refresh_silent: true,
@@ -369,13 +397,79 @@ impl MonitorApp {
         true
     }
 
+    fn ingest_gpu_frame(&mut self) -> bool {
+        let Some(frame) = self.worker.latest().take_gpu() else {
+            return false;
+        };
+        let Some(state) = self.wgpu_state.as_ref() else {
+            return false;
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut renderer = state.renderer.write();
+            match self.native_video_id {
+                Some(id) => renderer.update_egui_texture_from_wgpu_texture(
+                    &state.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                    id,
+                ),
+                None => {
+                    self.native_video_id = Some(renderer.register_native_texture(
+                        &state.device,
+                        &view,
+                        wgpu::FilterMode::Linear,
+                    ));
+                }
+            }
+        }
+        self.held_gpu_texture = Some(frame.texture);
+        self.texture = None;
+        self.frame_w = frame.width;
+        self.frame_h = frame.height;
+        self.fps_n = frame.frame_rate_n;
+        self.fps_d = frame.frame_rate_d.max(1);
+        self.window_fps_count += 1;
+        self.last_frame_at = Some(Instant::now());
+        self.frames_presented = self.frames_presented.saturating_add(1);
+        true
+    }
+
+    fn clear_native_video(&mut self) {
+        if let (Some(state), Some(id)) = (self.wgpu_state.as_ref(), self.native_video_id.take()) {
+            state.renderer.write().free_texture(&id);
+        }
+        self.held_gpu_texture = None;
+    }
+
+    pub(crate) fn has_video(&self) -> bool {
+        (self.native_video_id.is_some() || self.texture.is_some())
+            && self.frame_w > 0
+            && self.frame_h > 0
+    }
+
+    pub(crate) fn video_texture_id(&self) -> Option<TextureId> {
+        self.native_video_id
+            .or_else(|| self.texture.as_ref().map(|tex| tex.id()))
+    }
+
     fn on_tick(&mut self, ctx: &Context) -> bool {
         self.poll_discovery();
         if !self.discovering && self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.request_refresh(true);
         }
         self.ingest_logs();
-        let got_frame = self.ingest_prepared_frame(ctx);
+        let mut got_frame = self.ingest_gpu_frame();
+        if got_frame {
+            self.prep_ctrl.slot.store(None);
+        } else {
+            got_frame = self.ingest_prepared_frame(ctx);
+            if got_frame {
+                self.clear_native_video();
+            }
+        }
 
         {
             let counters = *self.worker.latest().counters.lock();
@@ -498,6 +592,7 @@ impl MonitorApp {
         self.frame_w = 0;
         self.frame_h = 0;
         self.texture = None;
+        self.clear_native_video();
         self.status = t(self.language, "monitor.none").to_string();
     }
 
@@ -527,6 +622,7 @@ impl MonitorApp {
         self.pan_y = 0.0;
         self.pan_drag = None;
         self.texture = None;
+        self.clear_native_video();
         self.status.clear();
     }
 
