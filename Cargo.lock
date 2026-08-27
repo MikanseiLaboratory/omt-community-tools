@@ -303,7 +303,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -314,7 +314,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1838,8 +1838,8 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "web-sys",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -2286,7 +2286,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -5209,7 +5209,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6114,6 +6114,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vmx",
+ "wgpu",
 ]
 
 [[package]]
@@ -6208,7 +6209,7 @@ dependencies = [
 [[package]]
 name = "openmediatransport"
 version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/openmediatransport-rs?rev=6b3040e765db5b460d0ed43a7474e62fb7f4c656#6b3040e765db5b460d0ed43a7474e62fb7f4c656"
+source = "git+https://github.com/MikanseiLaboratory/openmediatransport-rs?rev=67e3bbc78a3f1f60e2a2a7b45247e4e7050d159f#67e3bbc78a3f1f60e2a2a7b45247e4e7050d159f"
 dependencies = [
  "bytes",
  "mdns-sd",
@@ -8229,7 +8230,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8323,7 +8324,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9595,7 +9596,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9654,7 +9655,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9972,7 +9973,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vmx"
 version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/vmx-rs#34121bb86e1286f3a6d47ac21241c38f810614ab"
+source = "git+https://github.com/MikanseiLaboratory/vmx-rs?rev=d528f625fceb5d2d8aec0e006d03c7f1f5a36366#d528f625fceb5d2d8aec0e006d03c7f1f5a36366"
 dependencies = [
  "bytemuck",
  "pollster 0.4.0",
@@ -10642,7 +10643,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

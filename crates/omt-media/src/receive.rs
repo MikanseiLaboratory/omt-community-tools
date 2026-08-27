@@ -387,6 +387,7 @@ async fn worker_loop(
     let mut receiver: Option<ReceiverSession> = None;
     let mut playout = Playout::default();
     let mut gpu_decode = false;
+    let mut gpu_ctx: Option<GpuVideoContext> = None;
     publish_buffer_delays(&latest, &playout);
 
     loop {
@@ -426,6 +427,7 @@ async fn worker_loop(
         if pending_disconnect {
             apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
             gpu_decode = false;
+            gpu_ctx = None;
         }
         if let Some(opts) = pending_connect {
             gpu_decode = apply_connect(
@@ -438,6 +440,11 @@ async fn worker_loop(
                 &gpu_slot,
             )
             .await;
+            gpu_ctx = if gpu_decode {
+                gpu_slot.lock().clone()
+            } else {
+                None
+            };
         }
 
         if receiver.is_none() {
@@ -473,6 +480,7 @@ async fn worker_loop(
                     if pending_disconnect {
                         apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
                         gpu_decode = false;
+                        gpu_ctx = None;
                     }
                     if let Some(opts) = pending_connect {
                         gpu_decode = apply_connect(
@@ -485,6 +493,11 @@ async fn worker_loop(
                             &gpu_slot,
                         )
                         .await;
+                        gpu_ctx = if gpu_decode {
+                            gpu_slot.lock().clone()
+                        } else {
+                            None
+                        };
                     }
                 }
                 None => return,
@@ -499,11 +512,11 @@ async fn worker_loop(
                 if let Some(frame) = tokio::task::block_in_place(|| {
                     recv.recv_video_gpu_timeout(Duration::from_millis(5))
                 }) {
-                    ingest_gpu_video(&latest, &stall, &mut playout, frame);
+                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
                     got_any = true;
                 }
                 while let Some(frame) = recv.try_recv_video_gpu() {
-                    ingest_gpu_video(&latest, &stall, &mut playout, frame);
+                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
                     got_any = true;
                 }
             }
@@ -588,6 +601,7 @@ fn ingest_video(
 fn ingest_gpu_video(
     latest: &LatestVideo,
     stall: &Mutex<StallDetector>,
+    gpu_ctx: Option<&GpuVideoContext>,
     playout: &mut Playout,
     frame: DecodedVideoGpuFrame,
 ) {
@@ -600,6 +614,10 @@ fn ingest_gpu_video(
     stall
         .lock()
         .on_frame(frame.frame_rate_n, frame.frame_rate_d.max(1));
+    let frame = match gpu_ctx {
+        Some(ctx) => playout.copy_gpu_frame(ctx, frame),
+        None => frame,
+    };
     playout.push_gpu_video(frame);
 }
 
