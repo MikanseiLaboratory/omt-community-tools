@@ -263,13 +263,13 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "monitor.vu_meter") => "VUメーター",
         (Language::English, "monitor.preferences") => "Preferences",
         (Language::Japanese, "monitor.preferences") => "環境設定",
-        (Language::English, "monitor.license_spdx") => "MIT License",
-        (Language::Japanese, "monitor.license_spdx") => "MIT ライセンス",
+        (Language::English, "monitor.license_spdx") => "PolyForm Shield License 1.0.0",
+        (Language::Japanese, "monitor.license_spdx") => "PolyForm Shield ライセンス 1.0.0",
         (Language::English, "monitor.license_body") => {
-            "Copyright (c) MikanseiLaboratory. Permission is hereby granted, free of charge, to use, copy, modify, and distribute this software under the MIT License terms."
+            "Copyright (c) MikanseiLaboratory. You may use, modify, and distribute this software under the PolyForm Shield 1.0.0 terms, except to provide a competing product."
         }
         (Language::Japanese, "monitor.license_body") => {
-            "Copyright (c) MikanseiLaboratory. MIT ライセンスの条件下で、本ソフトウェアの使用・複製・改変・再配布が許可されています。"
+            "Copyright (c) MikanseiLaboratory. PolyForm Shield 1.0.0 の条件下で、本ソフトウェアの使用・改変・再配布が許可されています。競合製品の提供には使えません。"
         }
         (Language::English, "monitor.license_link") => "View full license on GitHub",
         (Language::Japanese, "monitor.license_link") => "GitHubで全文を表示",
