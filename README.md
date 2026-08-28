@@ -39,4 +39,6 @@ Runtime media stack: [`MikanseiLaboratory/openmediatransport-rs`](https://github
 
 ## License
 
-MIT
+[PolyForm Shield 1.0.0](https://polyformproject.org/licenses/shield/1.0.0)
+
+Source-available. You may use, modify, and distribute this software for any purpose except providing a product that competes with this software or with products MikanseiLaboratory provides using it. See [LICENSE](LICENSE) for the full terms.
