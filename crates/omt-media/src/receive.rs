@@ -510,8 +510,11 @@ async fn worker_loop(
             continue;
         }
 
-        // Wait briefly for video, then drain all ready A/V/metadata into playout.
-        let mut got_any = false;
+        // Feed the DAC before any video wait. GPU copy/submit on the eframe
+        // device can stall while the window is occluded; audio must not wait.
+        let mut got_any = drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
+        playout.release(&latest, &audio);
+
         if gpu_decode {
             if let Some(recv) = receiver.as_ref() {
                 if let Some(frame) = tokio::task::block_in_place(|| {
@@ -537,23 +540,11 @@ async fn worker_loop(
                 got_any = true;
             }
         }
+        got_any |= drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
+
         let Some(recv) = receiver.as_ref() else {
             continue;
         };
-        while let Some(packet) = recv.try_recv_audio() {
-            playout.push_audio(
-                packet.timestamp,
-                Arc::clone(&packet.pcm_planar_f32),
-                packet.channels,
-                packet.samples_per_channel,
-                packet.sample_rate,
-            );
-            got_any = true;
-        }
-        while let Some(meta) = recv.try_recv_metadata() {
-            push_log(&latest, "metadata", meta.xml.to_string());
-            got_any = true;
-        }
 
         if !got_any {
             stall.lock().tick();
@@ -571,6 +562,32 @@ async fn worker_loop(
         playout.release(&latest, &audio);
         publish_buffer_delays(&latest, &playout);
     }
+}
+
+fn drain_audio_and_meta(
+    recv: Option<&ReceiverSession>,
+    latest: &LatestVideo,
+    playout: &mut Playout,
+) -> bool {
+    let Some(recv) = recv else {
+        return false;
+    };
+    let mut got_any = false;
+    while let Some(packet) = recv.try_recv_audio() {
+        playout.push_audio(
+            packet.timestamp,
+            Arc::clone(&packet.pcm_planar_f32),
+            packet.channels,
+            packet.samples_per_channel,
+            packet.sample_rate,
+        );
+        got_any = true;
+    }
+    while let Some(meta) = recv.try_recv_metadata() {
+        push_log(latest, "metadata", meta.xml.to_string());
+        got_any = true;
+    }
+    got_any
 }
 
 fn ingest_video(

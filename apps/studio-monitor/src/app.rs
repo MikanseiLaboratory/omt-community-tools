@@ -155,8 +155,9 @@ struct MonitorApp {
     settings: MonitorSettings,
     buffer_edit: BufferEditState,
     fullscreen: bool,
-    /// Last seen window focus; used to catch up video after occlusion.
-    window_focused: bool,
+    /// eframe skips `ui` while minimized/occluded; ingest still runs in `logic`.
+    window_hidden: bool,
+    last_got_frame: bool,
     last_theme_dark: Option<bool>,
     simd_summary: String,
     sidebar_w: f32,
@@ -275,7 +276,8 @@ impl MonitorApp {
             settings,
             buffer_edit: BufferEditState::default(),
             fullscreen: false,
-            window_focused: true,
+            window_hidden: false,
+            last_got_frame: false,
             last_theme_dark: None,
             simd_summary: SimdCapabilities::detect().summary(),
             sidebar_w: clamp_sidebar_w(layout.sidebar_w as f32),
@@ -481,16 +483,20 @@ impl MonitorApp {
             .or_else(|| self.texture.as_ref().map(|tex| tex.id()))
     }
 
-    fn on_tick(&mut self, ctx: &Context) -> bool {
+    fn on_tick(&mut self, ctx: &Context, ingest_gpu: bool) -> bool {
         self.poll_discovery();
         if !self.discovering && self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.request_refresh(true);
         }
         self.ingest_logs();
-        let mut got_frame = self.ingest_gpu_frame();
-        if got_frame {
-            self.prep_ctrl.slot.store(None);
-        } else {
+        let mut got_frame = false;
+        if ingest_gpu {
+            got_frame = self.ingest_gpu_frame();
+            if got_frame {
+                self.prep_ctrl.slot.store(None);
+            }
+        }
+        if !got_frame {
             got_frame = self.ingest_prepared_frame(ctx);
             if got_frame {
                 self.clear_native_video();
@@ -916,16 +922,29 @@ impl MonitorApp {
 }
 
 impl eframe::App for MonitorApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // While the window is occluded, eframe skips `ui` / present and only
+        // calls this. Video ingest used to live in `ui`, so the picture froze
+        // until the window was shown again (audio kept playing on its thread).
+        self.apply_theme_if_needed(ctx);
+        let hidden = ctx.input(|i| i.viewport().visible() == Some(false));
+        let became_visible = self.window_hidden && !hidden;
+        self.window_hidden = hidden;
+        if became_visible {
+            self.rebind_held_gpu_texture();
+            ctx.request_repaint();
+        }
+        // Skip GPU texture uploads while occluded: they share eframe's wgpu
+        // device with decode/copy and can stall the receive thread (and audio).
+        self.last_got_frame = self.on_tick(ctx, !hidden);
+        if hidden && self.selected.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(i.focused));
-        let regained_focus = focused && !self.window_focused;
-        self.window_focused = focused;
-        if regained_focus {
-            self.rebind_held_gpu_texture();
-        }
-        self.apply_theme_if_needed(&ctx);
-        let got_frame = self.on_tick(&ctx);
+        let got_frame = self.last_got_frame;
 
         // Escape / F11 fullscreen handling
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -976,9 +995,7 @@ impl eframe::App for MonitorApp {
         }
 
         // Repaint when a prepared frame arrives (prep thread also requests).
-        // After occlusion, winit may drop those wakes; force an immediate
-        // frame so the latest CPU/GPU picture is uploaded on focus regain.
-        if got_frame || self.preferences_open || regained_focus {
+        if got_frame || self.preferences_open {
             ctx.request_repaint();
         } else if connected || self.fullscreen {
             ctx.request_repaint_after(Duration::from_millis(16));
