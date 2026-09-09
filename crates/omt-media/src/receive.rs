@@ -306,6 +306,11 @@ impl ReceiveWorker {
         self.audio.set_boost_db(db);
     }
 
+    /// Set listening volume (0..=100).
+    pub fn set_audio_volume_pct(&self, pct: i32) {
+        self.audio.set_volume_pct(pct);
+    }
+
     /// Select system audio output (`None` = default device).
     pub fn set_audio_output_device(&self, name: Option<String>) {
         self.audio.set_output_device(name);
@@ -675,7 +680,7 @@ async fn apply_connect(
     *latest.counters.lock() = ReceiveCounters::default();
     *latest.audio_levels.lock() = AudioLevels::default();
     latest.metadata_log.lock().clear();
-    audio.clear();
+    audio.reopen();
     playout.reset();
     publish_buffer_delays(latest, playout);
     stall.lock().reset();

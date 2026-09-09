@@ -14,8 +14,13 @@ use tracing::warn;
 
 const RING_CAP_SAMPLES: usize = 48_000 * 2 * 2; // ~2s stereo @ 48 kHz
 const TICKS_PER_SECOND: i64 = 10_000_000;
-/// If a stream is open but the callback never consumes PCM, mute after this.
+/// First PCM queued, but WASAPI never pulled at all.
 const DEAD_OUTPUT_GRACE: Duration = Duration::from_millis(500);
+/// After callbacks have started, tolerate this gap before reopening.
+const STALL_REOPEN: Duration = Duration::from_millis(1_500);
+const CALLBACK_ALIVE: Duration = Duration::from_millis(250);
+const REOPEN_POLL: Duration = Duration::from_millis(100);
+const FAILED_OPEN_RETRY: Duration = Duration::from_millis(400);
 
 /// Peak levels for VU display (linear 0..1, per channel).
 #[derive(Debug, Clone, Copy, Default)]
@@ -98,6 +103,8 @@ struct Shared {
     levels: Mutex<AudioLevels>,
     /// Playback boost in dB (applied when pushing).
     boost_db: AtomicI32,
+    /// Listening volume 0..=100 (does not change VU peaks).
+    volume_pct: AtomicI32,
     geometry: Mutex<DeviceGeometry>,
     /// `None` = system default output.
     device_name: Mutex<Option<String>>,
@@ -106,6 +113,8 @@ struct Shared {
     playhead_valid: AtomicBool,
     /// Last time the device callback consumed queued PCM.
     last_playback_activity: Mutex<Option<Instant>>,
+    /// Last time the device callback ran (silence or PCM). Proves WASAPI is pulling.
+    last_callback_at: Mutex<Option<Instant>>,
     status: Mutex<AudioOutputStatus>,
     /// Fast path for [`AudioOutput::push_planar_f32`].
     output_enabled: AtomicBool,
@@ -116,6 +125,8 @@ struct Shared {
     /// the default device is opened at app start and then sits idle until
     /// an OMT source connects, often well past [`DEAD_OUTPUT_GRACE`].
     first_queued_at: Mutex<Option<Instant>>,
+    /// Audio thread should drop the current stream and open again.
+    needs_reopen: AtomicBool,
 }
 
 enum AudioCmd {
@@ -146,6 +157,7 @@ impl AudioOutput {
             pts_runs: Mutex::new(VecDeque::new()),
             levels: Mutex::new(AudioLevels::default()),
             boost_db: AtomicI32::new(0),
+            volume_pct: AtomicI32::new(100),
             geometry: Mutex::new(DeviceGeometry {
                 channels: 2,
                 rate: 48_000,
@@ -154,10 +166,12 @@ impl AudioOutput {
             playhead_pts: AtomicI64::new(0),
             playhead_valid: AtomicBool::new(false),
             last_playback_activity: Mutex::new(None),
+            last_callback_at: Mutex::new(None),
             status: Mutex::new(AudioOutputStatus::Opening),
             output_enabled: AtomicBool::new(false),
             queued_since_open: AtomicBool::new(false),
             first_queued_at: Mutex::new(None),
+            needs_reopen: AtomicBool::new(false),
         });
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -199,11 +213,18 @@ impl AudioOutput {
         *self.shared.device_name.lock() = name.clone();
         self.clear();
         if let Some(tx) = self.cmd_tx.lock().as_ref() {
+            self.shared.needs_reopen.store(false, Ordering::Release);
             apply_status(&self.shared, AudioOutputStatus::Opening);
             let _ = tx.send(AudioCmd::SetDevice(name));
         } else {
             apply_status(&self.shared, AudioOutputStatus::Unavailable);
         }
+    }
+
+    /// Drop the current WASAPI client and open the selected device again.
+    pub fn reopen(&self) {
+        let name = self.shared.device_name.lock().clone();
+        self.set_output_device(name);
     }
 
     /// Snapshot of recent true-peak levels (linear 0..1).
@@ -214,6 +235,13 @@ impl AudioOutput {
     /// Set playback boost in dB (typical 0 / 6 / 10 / 20).
     pub fn set_boost_db(&self, db: i32) {
         self.shared.boost_db.store(db, Ordering::Relaxed);
+    }
+
+    /// Set listening volume (0..=100). Does not change VU peaks.
+    pub fn set_volume_pct(&self, pct: i32) {
+        self.shared
+            .volume_pct
+            .store(pct.clamp(0, 100), Ordering::Relaxed);
     }
 
     /// PTS of the sample currently being played, if the timeline is active.
@@ -227,10 +255,7 @@ impl AudioOutput {
 
     /// Whether the output callback has recently consumed queued PCM.
     pub(crate) fn playback_active(&self) -> bool {
-        self.shared
-            .last_playback_activity
-            .lock()
-            .is_some_and(|at| at.elapsed() <= Duration::from_millis(250))
+        recently(&self.shared.last_playback_activity, CALLBACK_ALIVE)
     }
 
     /// Buffered audio duration currently sitting in the device ring (milliseconds).
@@ -288,7 +313,8 @@ impl AudioOutput {
             return;
         }
 
-        let gain = db_to_gain(self.shared.boost_db.load(Ordering::Relaxed));
+        let boost = db_to_gain(self.shared.boost_db.load(Ordering::Relaxed));
+        let volume = self.shared.volume_pct.load(Ordering::Relaxed).clamp(0, 100) as f32 / 100.0;
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
 
@@ -298,14 +324,14 @@ impl AudioOutput {
             let mut plane = Vec::with_capacity(n);
             for s in 0..n {
                 let o = base + s * 4;
-                let sample = f32::from_le_bytes(data[o..o + 4].try_into().unwrap()) * gain;
+                let sample = f32::from_le_bytes(data[o..o + 4].try_into().unwrap()) * boost;
                 let a = sample.abs();
                 if c == 0 {
                     peak_l = peak_l.max(a);
                 } else if c == 1 {
                     peak_r = peak_r.max(a);
                 }
-                plane.push(sample.clamp(-1.0, 1.0));
+                plane.push((sample * volume).clamp(-1.0, 1.0));
             }
             planes.push(plane);
         }
@@ -333,6 +359,7 @@ impl AudioOutput {
         } else {
             ((n as u64 * dst_rate as u64) / src_rate as u64).max(1) as usize
         };
+        let interleaved = resample_interleaved(&planes, n, out_ch, out_n);
         let pts_duration = (n as i64)
             .saturating_mul(TICKS_PER_SECOND)
             .saturating_div(i64::from(sample_rate.max(1)));
@@ -342,28 +369,14 @@ impl AudioOutput {
 
         // Drop oldest samples + matching timeline when the ring overflows.
         let mut dropped_frames = 0usize;
-        for i in 0..out_n {
-            let src_i = if out_n == n {
-                i
-            } else {
-                ((i as u64 * n as u64) / out_n as u64) as usize
-            };
-            for c in 0..out_ch {
-                let sample = if c < ch {
-                    planes[c][src_i.min(n - 1)]
-                } else if ch == 1 {
-                    planes[0][src_i.min(n - 1)]
-                } else {
-                    0.0
-                };
-                if ring.len() >= RING_CAP_SAMPLES {
-                    ring.pop_front();
-                    if c == 0 {
-                        dropped_frames += 1;
-                    }
+        for (i, sample) in interleaved.into_iter().enumerate() {
+            if ring.len() >= RING_CAP_SAMPLES {
+                ring.pop_front();
+                if i % out_ch == 0 {
+                    dropped_frames += 1;
                 }
-                ring.push_back(sample);
             }
+            ring.push_back(sample);
         }
         for _ in 0..dropped_frames {
             consume_pts_frames(&mut pts_runs, 1, &self.shared);
@@ -403,20 +416,20 @@ impl AudioOutput {
         if !self.shared.queued_since_open.load(Ordering::Acquire) {
             return;
         }
-        let Some(queued_at) = *self.shared.first_queued_at.lock() else {
-            return;
-        };
-        if queued_at.elapsed() <= DEAD_OUTPUT_GRACE {
-            return;
+        if let Some(callback_at) = *self.shared.last_callback_at.lock() {
+            if callback_at.elapsed() <= STALL_REOPEN {
+                return;
+            }
+        } else {
+            let Some(queued_at) = *self.shared.first_queued_at.lock() else {
+                return;
+            };
+            if queued_at.elapsed() <= DEAD_OUTPUT_GRACE {
+                return;
+            }
         }
-        warn!("audio output opened but is not consuming PCM; muting");
-        apply_status(&self.shared, AudioOutputStatus::Unavailable);
-        self.shared.ring.lock().clear();
-        self.shared.pts_runs.lock().clear();
-        self.invalidate_playhead();
-        let mut levels = self.shared.levels.lock();
-        levels.peak_l = 0.0;
-        levels.peak_r = 0.0;
+        warn!("audio output opened but is not being pulled; reopening");
+        request_reopen(&self.shared, self.cmd_tx.lock().as_ref());
     }
 
     fn record_silent_packet(&self, sample_rate: i32, channels: i32) {
@@ -465,6 +478,65 @@ fn db_to_gain(db: i32) -> f32 {
     10f32.powf(db as f32 / 20.0)
 }
 
+fn resample_interleaved(planes: &[Vec<f32>], n: usize, out_ch: usize, out_n: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(out_n.saturating_mul(out_ch));
+    if n == 0 || out_n == 0 || planes.is_empty() {
+        return out;
+    }
+    let src_ch = planes.len();
+    let last = n - 1;
+    for i in 0..out_n {
+        let (i0, frac) = if out_n == n {
+            (i.min(last), 0.0)
+        } else {
+            let pos = (i as f64) * (n as f64) / (out_n as f64);
+            let i0 = (pos.floor() as usize).min(last);
+            (i0, (pos - i0 as f64) as f32)
+        };
+        let i1 = (i0 + 1).min(last);
+        for c in 0..out_ch {
+            let sample = if c < src_ch {
+                let a = planes[c][i0];
+                let b = planes[c][i1];
+                a + (b - a) * frac
+            } else if src_ch == 1 {
+                let a = planes[0][i0];
+                let b = planes[0][i1];
+                a + (b - a) * frac
+            } else {
+                0.0
+            };
+            out.push(sample);
+        }
+    }
+    out
+}
+
+fn recently(slot: &Mutex<Option<Instant>>, within: Duration) -> bool {
+    slot.lock().is_some_and(|at| at.elapsed() <= within)
+}
+
+fn request_reopen(shared: &Shared, cmd_tx: Option<&Sender<AudioCmd>>) {
+    shared.ring.lock().clear();
+    shared.pts_runs.lock().clear();
+    shared.playhead_valid.store(false, Ordering::Release);
+    shared.playhead_pts.store(0, Ordering::Release);
+    *shared.last_playback_activity.lock() = None;
+    let mut levels = shared.levels.lock();
+    levels.peak_l = 0.0;
+    levels.peak_r = 0.0;
+    drop(levels);
+
+    if cmd_tx.is_some() {
+        if shared.needs_reopen.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        apply_status(shared, AudioOutputStatus::Opening);
+        return;
+    }
+    apply_status(shared, AudioOutputStatus::Unavailable);
+}
+
 fn apply_status(shared: &Shared, status: AudioOutputStatus) {
     *shared.status.lock() = status;
     let ready = matches!(status, AudioOutputStatus::Ready);
@@ -479,10 +551,26 @@ fn apply_status(shared: &Shared, status: AudioOutputStatus) {
     }
 }
 
-fn wait_device_cmd(cmd_rx: &mpsc::Receiver<AudioCmd>) -> Option<Option<String>> {
-    match cmd_rx.recv() {
-        Ok(AudioCmd::SetDevice(name)) => Some(name),
-        Ok(AudioCmd::Shutdown) | Err(_) => None,
+fn wait_device_cmd(
+    cmd_rx: &mpsc::Receiver<AudioCmd>,
+    selected: &Option<String>,
+    shared: &Shared,
+    retry_on_timeout: bool,
+    poll: Duration,
+) -> Option<Option<String>> {
+    loop {
+        match cmd_rx.recv_timeout(poll) {
+            Ok(AudioCmd::SetDevice(name)) => return Some(name),
+            Ok(AudioCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if retry_on_timeout {
+                    return Some(selected.clone());
+                }
+                if shared.needs_reopen.swap(false, Ordering::AcqRel) {
+                    return Some(selected.clone());
+                }
+            }
+        }
     }
 }
 
@@ -505,12 +593,13 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
     let mut selected = shared.device_name.lock().clone();
     loop {
         apply_status(&shared, AudioOutputStatus::Opening);
+        shared.needs_reopen.store(false, Ordering::Release);
         let device = match resolve_device(&selected) {
             Ok(d) => d,
             Err(e) => {
                 warn!("audio output unavailable: {e}");
                 apply_status(&shared, AudioOutputStatus::Unavailable);
-                match wait_device_cmd(&cmd_rx) {
+                match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
                     Some(name) => {
                         selected = name;
                         *shared.device_name.lock() = selected.clone();
@@ -526,7 +615,7 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
             Err(e) => {
                 warn!("audio output config failed: {e}");
                 apply_status(&shared, AudioOutputStatus::Unavailable);
-                match wait_device_cmd(&cmd_rx) {
+                match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
                     Some(name) => {
                         selected = name;
                         *shared.device_name.lock() = selected.clone();
@@ -547,45 +636,29 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
         shared.pts_runs.lock().clear();
         shared.playhead_valid.store(false, Ordering::Release);
         *shared.last_playback_activity.lock() = None;
+        *shared.last_callback_at.lock() = None;
 
-        let shared_cb = Arc::clone(&shared);
-        let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, shared_cb),
-            SampleFormat::I16 => build_stream::<i16>(&device, &config, shared_cb),
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, shared_cb),
-            other => {
-                warn!("unsupported sample format: {other:?}");
-                apply_status(&shared, AudioOutputStatus::Unavailable);
-                match wait_device_cmd(&cmd_rx) {
-                    Some(name) => {
-                        selected = name;
-                        *shared.device_name.lock() = selected.clone();
-                        continue;
+        let stream =
+            match build_stream_for_format(&device, sample_format, &config, Arc::clone(&shared)) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("audio stream build failed: {e}");
+                    apply_status(&shared, AudioOutputStatus::Unavailable);
+                    match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
+                        Some(name) => {
+                            selected = name;
+                            *shared.device_name.lock() = selected.clone();
+                            continue;
+                        }
+                        None => return Ok(()),
                     }
-                    None => return Ok(()),
                 }
-            }
-        };
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("audio stream build failed: {e}");
-                apply_status(&shared, AudioOutputStatus::Unavailable);
-                match wait_device_cmd(&cmd_rx) {
-                    Some(name) => {
-                        selected = name;
-                        *shared.device_name.lock() = selected.clone();
-                        continue;
-                    }
-                    None => return Ok(()),
-                }
-            }
-        };
+            };
         if let Err(e) = stream.play() {
             warn!("audio stream play failed: {e}");
             drop(stream);
             apply_status(&shared, AudioOutputStatus::Unavailable);
-            match wait_device_cmd(&cmd_rx) {
+            match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
                 Some(name) => {
                     selected = name;
                     *shared.device_name.lock() = selected.clone();
@@ -596,7 +669,7 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
         }
         apply_status(&shared, AudioOutputStatus::Ready);
 
-        match wait_device_cmd(&cmd_rx) {
+        match wait_device_cmd(&cmd_rx, &selected, &shared, false, REOPEN_POLL) {
             Some(name) => {
                 drop(stream);
                 selected = name;
@@ -608,6 +681,20 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
                 return Ok(());
             }
         }
+    }
+}
+
+fn build_stream_for_format(
+    device: &cpal::Device,
+    sample_format: SampleFormat,
+    config: &StreamConfig,
+    shared: Arc<Shared>,
+) -> Result<cpal::Stream, String> {
+    match sample_format {
+        SampleFormat::F32 => build_stream::<f32>(device, config, shared),
+        SampleFormat::I16 => build_stream::<i16>(device, config, shared),
+        SampleFormat::U16 => build_stream::<u16>(device, config, shared),
+        other => Err(format!("unsupported sample format: {other:?}")),
     }
 }
 
@@ -625,7 +712,13 @@ where
         .build_output_stream(
             *config,
             move |data: &mut [T], _| {
-                let mut ring = shared.ring.lock();
+                *shared.last_callback_at.lock() = Some(Instant::now());
+                let Some(mut ring) = shared.ring.try_lock() else {
+                    for sample in data.iter_mut() {
+                        *sample = T::from_sample(0.0);
+                    }
+                    return;
+                };
                 let mut got = 0usize;
                 for sample in data.iter_mut() {
                     match ring.pop_front() {
@@ -642,14 +735,16 @@ where
 
                 let frames_from_ring = got / channels;
                 if frames_from_ring > 0 {
-                    let mut runs = shared.pts_runs.lock();
-                    consume_pts_frames(&mut runs, frames_from_ring, &shared);
+                    if let Some(mut runs) = shared.pts_runs.try_lock() {
+                        consume_pts_frames(&mut runs, frames_from_ring, &shared);
+                    }
                     *shared.last_playback_activity.lock() = Some(Instant::now());
                 }
             },
             move |err| {
                 warn!("audio stream error: {err}");
-                apply_status(&err_shared, AudioOutputStatus::Unavailable);
+                err_shared.needs_reopen.store(true, Ordering::Release);
+                apply_status(&err_shared, AudioOutputStatus::Opening);
             },
             None,
         )
@@ -667,6 +762,7 @@ mod tests {
             pts_runs: Mutex::new(VecDeque::new()),
             levels: Mutex::new(AudioLevels::default()),
             boost_db: AtomicI32::new(0),
+            volume_pct: AtomicI32::new(100),
             geometry: Mutex::new(DeviceGeometry {
                 channels: 2,
                 rate: 48_000,
@@ -675,10 +771,12 @@ mod tests {
             playhead_pts: AtomicI64::new(0),
             playhead_valid: AtomicBool::new(false),
             last_playback_activity: Mutex::new(None),
+            last_callback_at: Mutex::new(None),
             status: Mutex::new(status),
             output_enabled: AtomicBool::new(ready),
             queued_since_open: AtomicBool::new(false),
             first_queued_at: Mutex::new(None),
+            needs_reopen: AtomicBool::new(false),
         });
         AudioOutput {
             shared,
@@ -723,6 +821,20 @@ mod tests {
         let levels = audio.levels();
         assert_eq!(levels.peak_l, 0.0);
         assert_eq!(levels.frames, 2);
+        assert!(!audio.shared.needs_reopen.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn callback_heartbeat_keeps_ready_after_grace() {
+        let audio = stub(AudioOutputStatus::Ready);
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 10_000);
+        *audio.shared.first_queued_at.lock() =
+            Some(Instant::now() - DEAD_OUTPUT_GRACE - Duration::from_millis(50));
+        *audio.shared.last_callback_at.lock() = Some(Instant::now());
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 20_000);
+        assert_eq!(audio.status(), AudioOutputStatus::Ready);
+        assert!(audio.buffered_ms() > 0.0);
+        assert!(audio.levels().peak_l > 0.0);
     }
 
     #[test]
@@ -738,5 +850,37 @@ mod tests {
         let levels = audio.levels();
         assert_eq!(levels.frames, 3);
         assert!(levels.peak_l > 0.0);
+    }
+
+    #[test]
+    fn brief_callback_gap_does_not_reopen() {
+        let audio = stub(AudioOutputStatus::Ready);
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 10_000);
+        *audio.shared.first_queued_at.lock() =
+            Some(Instant::now() - DEAD_OUTPUT_GRACE - Duration::from_secs(5));
+        *audio.shared.last_callback_at.lock() = Some(Instant::now() - Duration::from_millis(400));
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 20_000);
+        assert_eq!(audio.status(), AudioOutputStatus::Ready);
+        assert!(audio.buffered_ms() > 0.0);
+    }
+
+    #[test]
+    fn linear_resample_interpolates_between_samples() {
+        let planes = vec![vec![0.0f32, 1.0]];
+        let out = resample_interleaved(&planes, 2, 1, 3);
+        assert_eq!(out.len(), 3);
+        assert!((out[0] - 0.0).abs() < 1e-5);
+        assert!(out[1] > 0.2 && out[1] < 0.8);
+        assert!(out[2] > 0.5);
+    }
+
+    #[test]
+    fn volume_scales_ring_but_not_vu() {
+        let audio = stub(AudioOutputStatus::Ready);
+        audio.set_volume_pct(50);
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 10_000);
+        assert!((audio.levels().peak_l - 0.75).abs() < 1e-5);
+        let sample = audio.shared.ring.lock()[0];
+        assert!((sample - 0.375).abs() < 1e-5);
     }
 }

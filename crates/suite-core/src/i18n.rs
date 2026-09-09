@@ -195,6 +195,8 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "monitor.exit") => "終了",
         (Language::English, "monitor.audio_boost") => "Boost",
         (Language::Japanese, "monitor.audio_boost") => "ブースト",
+        (Language::English, "monitor.audio_volume") => "Volume",
+        (Language::Japanese, "monitor.audio_volume") => "音量",
         (Language::English, "monitor.audio_output") => "Audio output",
         (Language::Japanese, "monitor.audio_output") => "音声出力先",
         (Language::English, "monitor.audio_default") => "System default",

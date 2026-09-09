@@ -185,6 +185,7 @@ impl MonitorApp {
         settings.video_decode = settings::decode_path_from_config(layout.video_decode);
         worker.set_buffer(settings.buffer);
         worker.set_audio_boost_db(settings.audio_boost_db);
+        worker.set_audio_volume_pct(settings.audio_volume_pct);
         if let Some(url) = &initial_url {
             let (quality, preview) = settings.quality.to_connect_parts();
             worker.connect_with(ConnectOptions {
@@ -637,6 +638,12 @@ impl MonitorApp {
         self.worker.set_audio_boost_db(db);
     }
 
+    fn set_audio_volume_pct(&mut self, pct: i32) {
+        self.settings.audio_volume_pct = pct.clamp(0, 100);
+        self.worker
+            .set_audio_volume_pct(self.settings.audio_volume_pct);
+    }
+
     fn set_video_delay(&mut self, delay: DelaySetting) {
         let (fps_n, fps_d) = self.buffer_fps();
         self.settings.buffer.set_video(delay, fps_n, fps_d);
@@ -817,6 +824,7 @@ impl MonitorApp {
                 );
             }
             PrefsAction::SetBoost(db) => self.set_audio_boost_db(db),
+            PrefsAction::SetVolume(pct) => self.set_audio_volume_pct(pct),
             PrefsAction::SetQuality(preset) => {
                 self.settings.quality = preset;
                 self.reapply_connection();

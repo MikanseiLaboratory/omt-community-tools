@@ -38,6 +38,8 @@ pub struct MonitorSettings {
     /// VMX decode backend (CPU SIMD vs wgpu).
     pub video_decode: omt_media::VideoDecodePath,
     pub audio_boost_db: i32,
+    /// Listening volume 0..=100.
+    pub audio_volume_pct: i32,
     /// Linked or independent A/V playout buffers (PTS gate).
     pub buffer: BufferSettings,
 }
@@ -51,6 +53,7 @@ impl Default for MonitorSettings {
             quality: VideoQualityPreset::Default,
             video_decode: omt_media::VideoDecodePath::Cpu,
             audio_boost_db: 0,
+            audio_volume_pct: 100,
             buffer: BufferSettings::default(),
         }
     }
