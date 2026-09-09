@@ -111,7 +111,11 @@ struct Shared {
     output_enabled: AtomicBool,
     /// At least one packet was queued after the current stream opened.
     queued_since_open: AtomicBool,
-    stream_opened_at: Mutex<Option<Instant>>,
+    /// When the first PCM packet was queued into the current Ready stream.
+    /// Dead-output grace is measured from this instant, not stream open:
+    /// the default device is opened at app start and then sits idle until
+    /// an OMT source connects, often well past [`DEAD_OUTPUT_GRACE`].
+    first_queued_at: Mutex<Option<Instant>>,
 }
 
 enum AudioCmd {
@@ -153,7 +157,7 @@ impl AudioOutput {
             status: Mutex::new(AudioOutputStatus::Opening),
             output_enabled: AtomicBool::new(false),
             queued_since_open: AtomicBool::new(false),
-            stream_opened_at: Mutex::new(None),
+            first_queued_at: Mutex::new(None),
         });
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -376,7 +380,11 @@ impl AudioOutput {
                 self.shared.playhead_pts.store(timestamp, Ordering::Release);
                 self.shared.playhead_valid.store(true, Ordering::Release);
             }
-            self.shared.queued_since_open.store(true, Ordering::Release);
+        }
+        drop(pts_runs);
+        drop(ring);
+        if out_n > 0 && !self.shared.queued_since_open.swap(true, Ordering::AcqRel) {
+            *self.shared.first_queued_at.lock() = Some(Instant::now());
         }
     }
 
@@ -395,10 +403,10 @@ impl AudioOutput {
         if !self.shared.queued_since_open.load(Ordering::Acquire) {
             return;
         }
-        let Some(opened_at) = *self.shared.stream_opened_at.lock() else {
+        let Some(queued_at) = *self.shared.first_queued_at.lock() else {
             return;
         };
-        if opened_at.elapsed() <= DEAD_OUTPUT_GRACE {
+        if queued_at.elapsed() <= DEAD_OUTPUT_GRACE {
             return;
         }
         warn!("audio output opened but is not consuming PCM; muting");
@@ -462,10 +470,10 @@ fn apply_status(shared: &Shared, status: AudioOutputStatus) {
     let ready = matches!(status, AudioOutputStatus::Ready);
     shared.output_enabled.store(ready, Ordering::Release);
     if ready {
-        *shared.stream_opened_at.lock() = Some(Instant::now());
+        *shared.first_queued_at.lock() = None;
         shared.queued_since_open.store(false, Ordering::Release);
     } else {
-        *shared.stream_opened_at.lock() = None;
+        *shared.first_queued_at.lock() = None;
         shared.queued_since_open.store(false, Ordering::Release);
         shared.output_enabled.store(false, Ordering::Release);
     }
@@ -670,7 +678,7 @@ mod tests {
             status: Mutex::new(status),
             output_enabled: AtomicBool::new(ready),
             queued_since_open: AtomicBool::new(false),
-            stream_opened_at: Mutex::new(ready.then(Instant::now)),
+            first_queued_at: Mutex::new(None),
         });
         AudioOutput {
             shared,
@@ -702,12 +710,12 @@ mod tests {
     #[test]
     fn idle_ready_stream_mutes_after_grace() {
         let audio = stub(AudioOutputStatus::Ready);
-        *audio.shared.stream_opened_at.lock() =
-            Some(Instant::now() - DEAD_OUTPUT_GRACE - Duration::from_millis(50));
         audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 10_000);
         assert!(audio.buffered_ms() > 0.0);
         assert_eq!(audio.status(), AudioOutputStatus::Ready);
 
+        *audio.shared.first_queued_at.lock() =
+            Some(Instant::now() - DEAD_OUTPUT_GRACE - Duration::from_millis(50));
         audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 20_000);
         assert_eq!(audio.status(), AudioOutputStatus::Unavailable);
         assert_eq!(audio.buffered_ms(), 0.0);
@@ -715,5 +723,20 @@ mod tests {
         let levels = audio.levels();
         assert_eq!(levels.peak_l, 0.0);
         assert_eq!(levels.frames, 2);
+    }
+
+    #[test]
+    fn preroll_burst_on_long_idle_default_device_stays_ready() {
+        // System default is opened at app start. After the user later connects,
+        // playout releases the preroll as a burst before the callback can run.
+        let audio = stub(AudioOutputStatus::Ready);
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 10_000);
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 20_000);
+        audio.push_planar_f32(&loud_packet(), 1, 1, 48_000, 30_000);
+        assert_eq!(audio.status(), AudioOutputStatus::Ready);
+        assert!(audio.buffered_ms() > 0.0);
+        let levels = audio.levels();
+        assert_eq!(levels.frames, 3);
+        assert!(levels.peak_l > 0.0);
     }
 }
