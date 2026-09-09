@@ -155,6 +155,8 @@ struct MonitorApp {
     settings: MonitorSettings,
     buffer_edit: BufferEditState,
     fullscreen: bool,
+    /// Last seen window focus; used to catch up video after occlusion.
+    window_focused: bool,
     last_theme_dark: Option<bool>,
     simd_summary: String,
     sidebar_w: f32,
@@ -273,6 +275,7 @@ impl MonitorApp {
             settings,
             buffer_edit: BufferEditState::default(),
             fullscreen: false,
+            window_focused: true,
             last_theme_dark: None,
             simd_summary: SimdCapabilities::detect().summary(),
             sidebar_w: clamp_sidebar_w(layout.sidebar_w as f32),
@@ -443,6 +446,28 @@ impl MonitorApp {
             state.renderer.write().free_texture(&id);
         }
         self.held_gpu_texture = None;
+    }
+
+    fn rebind_held_gpu_texture(&mut self) {
+        let Some(tex) = self.held_gpu_texture.as_ref() else {
+            return;
+        };
+        let Some(state) = self.wgpu_state.as_ref() else {
+            return;
+        };
+        let Some(id) = self.native_video_id else {
+            return;
+        };
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        state
+            .renderer
+            .write()
+            .update_egui_texture_from_wgpu_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            );
     }
 
     pub(crate) fn has_video(&self) -> bool {
@@ -893,6 +918,12 @@ impl MonitorApp {
 impl eframe::App for MonitorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(i.focused));
+        let regained_focus = focused && !self.window_focused;
+        self.window_focused = focused;
+        if regained_focus {
+            self.rebind_held_gpu_texture();
+        }
         self.apply_theme_if_needed(&ctx);
         let got_frame = self.on_tick(&ctx);
 
@@ -945,11 +976,10 @@ impl eframe::App for MonitorApp {
         }
 
         // Repaint when a prepared frame arrives (prep thread also requests).
-        // VU meters only need ~30 Hz — continuous full-rate paints starve the GPU path.
-        if got_frame || self.preferences_open {
+        // After occlusion, winit may drop those wakes; force an immediate
+        // frame so the latest CPU/GPU picture is uploaded on focus regain.
+        if got_frame || self.preferences_open || regained_focus {
             ctx.request_repaint();
-        } else if connected && self.settings.vu_meter {
-            ctx.request_repaint_after(Duration::from_millis(33));
         } else if connected || self.fullscreen {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else {
