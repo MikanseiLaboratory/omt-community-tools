@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openmediatransport::{
@@ -246,6 +247,8 @@ pub struct ReceiveWorker {
     stall: Arc<Mutex<StallDetector>>,
     audio: Arc<AudioOutput>,
     gpu: Arc<Mutex<Option<GpuVideoContext>>>,
+    /// When false, drop GPU frames without copying (window occluded).
+    gpu_ingest: Arc<AtomicBool>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -257,13 +260,15 @@ impl ReceiveWorker {
         let stall = Arc::new(Mutex::new(StallDetector::default()));
         let audio = Arc::new(AudioOutput::new());
         let gpu = Arc::new(Mutex::new(None));
+        let gpu_ingest = Arc::new(AtomicBool::new(true));
         let latest_c = Arc::clone(&latest);
         let stall_c = Arc::clone(&stall);
         let audio_c = Arc::clone(&audio);
         let gpu_c = Arc::clone(&gpu);
+        let gpu_ingest_c = Arc::clone(&gpu_ingest);
 
         let join = runtime::spawn(async move {
-            worker_loop(rx, latest_c, stall_c, audio_c, gpu_c).await;
+            worker_loop(rx, latest_c, stall_c, audio_c, gpu_c, gpu_ingest_c).await;
         });
 
         Self {
@@ -272,6 +277,7 @@ impl ReceiveWorker {
             stall,
             audio,
             gpu,
+            gpu_ingest,
             join: Some(join),
         }
     }
@@ -299,6 +305,12 @@ impl ReceiveWorker {
     /// Whether [`Self::set_gpu`] received an eframe wgpu device.
     pub fn gpu_available(&self) -> Option<bool> {
         Some(self.gpu.lock().is_some())
+    }
+
+    /// Allow GPU texture copies into playout. Disable while the window is
+    /// occluded so copy/submit cannot stall the shared eframe wgpu device.
+    pub fn set_gpu_ingest(&self, enabled: bool) {
+        self.gpu_ingest.store(enabled, Ordering::Release);
     }
 
     /// Set playback boost in dB.
@@ -388,6 +400,7 @@ async fn worker_loop(
     stall: Arc<Mutex<StallDetector>>,
     audio: Arc<AudioOutput>,
     gpu_slot: Arc<Mutex<Option<GpuVideoContext>>>,
+    gpu_ingest: Arc<AtomicBool>,
 ) {
     let mut receiver: Option<ReceiverSession> = None;
     let mut playout = Playout::default();
@@ -517,15 +530,23 @@ async fn worker_loop(
 
         if gpu_decode {
             if let Some(recv) = receiver.as_ref() {
-                if let Some(frame) = tokio::task::block_in_place(|| {
-                    recv.recv_video_gpu_timeout(Duration::from_millis(5))
-                }) {
-                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
-                    got_any = true;
-                }
-                while let Some(frame) = recv.try_recv_video_gpu() {
-                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
-                    got_any = true;
+                if gpu_ingest.load(Ordering::Acquire) {
+                    if let Some(frame) = tokio::task::block_in_place(|| {
+                        recv.recv_video_gpu_timeout(Duration::from_millis(5))
+                    }) {
+                        ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
+                        got_any = true;
+                    }
+                    while let Some(frame) = recv.try_recv_video_gpu() {
+                        ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
+                        got_any = true;
+                    }
+                } else {
+                    // Drop already-decoded GPU frames without a wgpu copy.
+                    while recv.try_recv_video_gpu().is_some() {}
+                    if !got_any {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
                 }
             }
         } else if let Some(recv) = receiver.as_ref() {
@@ -555,8 +576,13 @@ async fn worker_loop(
         *latest.session_state.lock() = state;
         if state != prev {
             push_log(latest.as_ref(), "session", format!("{state:?}"));
+            if state == SessionState::Connected {
+                *latest.error.lock() = None;
+            }
         }
-        if let Some(err) = recv.last_error() {
+        if state != SessionState::Connected
+            && let Some(err) = recv.last_error()
+        {
             *latest.error.lock() = Some(err);
         }
         playout.release(&latest, &audio);

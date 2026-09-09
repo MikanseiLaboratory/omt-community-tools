@@ -361,8 +361,10 @@ impl MonitorApp {
                 entry.kind,
                 entry.text
             );
-            self.log_lines.clear();
             self.log_lines.push_back(line);
+            while self.log_lines.len() > 128 {
+                self.log_lines.pop_front();
+            }
         }
     }
 
@@ -552,15 +554,15 @@ impl MonitorApp {
                 self.status = "Connecting…".into();
             }
             SessionState::Reconnecting => {
-                self.status = format!("Reconnecting… ({})", self.reconnects);
+                self.status = match self.worker.latest().error.lock().clone() {
+                    Some(err) if !err.is_empty() => {
+                        format!("Reconnecting… ({}) — {err}", self.reconnects)
+                    }
+                    _ => format!("Reconnecting… ({})", self.reconnects),
+                };
             }
             SessionState::Connected => {
-                if let Some(err) = self.worker.latest().error.lock().clone() {
-                    if !err.is_empty() {
-                        self.status = err;
-                    }
-                } else if self.status.starts_with("Connecting")
-                    || self.status.starts_with("Reconnecting")
+                if self.status.starts_with("Connecting") || self.status.starts_with("Reconnecting")
                 {
                     self.status.clear();
                 }
@@ -930,16 +932,15 @@ impl eframe::App for MonitorApp {
         let hidden = ctx.input(|i| i.viewport().visible() == Some(false));
         let became_visible = self.window_hidden && !hidden;
         self.window_hidden = hidden;
+        // Pause wgpu copies in the receive worker while occluded. The previous
+        // 16ms hidden repaint still submitted GPU work with no present, which
+        // wedged the shared device and made the OMT sockets flap (Reconnects).
+        self.worker.set_gpu_ingest(!hidden);
         if became_visible {
             self.rebind_held_gpu_texture();
             ctx.request_repaint();
         }
-        // Skip GPU texture uploads while occluded: they share eframe's wgpu
-        // device with decode/copy and can stall the receive thread (and audio).
         self.last_got_frame = self.on_tick(ctx, !hidden);
-        if hidden && self.selected.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(16));
-        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
