@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openmediatransport::{
@@ -246,6 +247,8 @@ pub struct ReceiveWorker {
     stall: Arc<Mutex<StallDetector>>,
     audio: Arc<AudioOutput>,
     gpu: Arc<Mutex<Option<GpuVideoContext>>>,
+    /// When false, drop GPU frames without copying (window occluded).
+    gpu_ingest: Arc<AtomicBool>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -257,13 +260,15 @@ impl ReceiveWorker {
         let stall = Arc::new(Mutex::new(StallDetector::default()));
         let audio = Arc::new(AudioOutput::new());
         let gpu = Arc::new(Mutex::new(None));
+        let gpu_ingest = Arc::new(AtomicBool::new(true));
         let latest_c = Arc::clone(&latest);
         let stall_c = Arc::clone(&stall);
         let audio_c = Arc::clone(&audio);
         let gpu_c = Arc::clone(&gpu);
+        let gpu_ingest_c = Arc::clone(&gpu_ingest);
 
         let join = runtime::spawn(async move {
-            worker_loop(rx, latest_c, stall_c, audio_c, gpu_c).await;
+            worker_loop(rx, latest_c, stall_c, audio_c, gpu_c, gpu_ingest_c).await;
         });
 
         Self {
@@ -272,6 +277,7 @@ impl ReceiveWorker {
             stall,
             audio,
             gpu,
+            gpu_ingest,
             join: Some(join),
         }
     }
@@ -301,9 +307,20 @@ impl ReceiveWorker {
         Some(self.gpu.lock().is_some())
     }
 
+    /// Allow GPU texture copies into playout. Disable while the window is
+    /// occluded so copy/submit cannot stall the shared eframe wgpu device.
+    pub fn set_gpu_ingest(&self, enabled: bool) {
+        self.gpu_ingest.store(enabled, Ordering::Release);
+    }
+
     /// Set playback boost in dB.
     pub fn set_audio_boost_db(&self, db: i32) {
         self.audio.set_boost_db(db);
+    }
+
+    /// Set listening volume (0..=100).
+    pub fn set_audio_volume_pct(&self, pct: i32) {
+        self.audio.set_volume_pct(pct);
     }
 
     /// Select system audio output (`None` = default device).
@@ -383,6 +400,7 @@ async fn worker_loop(
     stall: Arc<Mutex<StallDetector>>,
     audio: Arc<AudioOutput>,
     gpu_slot: Arc<Mutex<Option<GpuVideoContext>>>,
+    gpu_ingest: Arc<AtomicBool>,
 ) {
     let mut receiver: Option<ReceiverSession> = None;
     let mut playout = Playout::default();
@@ -505,19 +523,30 @@ async fn worker_loop(
             continue;
         }
 
-        // Wait briefly for video, then drain all ready A/V/metadata into playout.
-        let mut got_any = false;
+        // Feed the DAC before any video wait. GPU copy/submit on the eframe
+        // device can stall while the window is occluded; audio must not wait.
+        let mut got_any = drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
+        playout.release(&latest, &audio);
+
         if gpu_decode {
             if let Some(recv) = receiver.as_ref() {
-                if let Some(frame) = tokio::task::block_in_place(|| {
-                    recv.recv_video_gpu_timeout(Duration::from_millis(5))
-                }) {
-                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
-                    got_any = true;
-                }
-                while let Some(frame) = recv.try_recv_video_gpu() {
-                    ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
-                    got_any = true;
+                if gpu_ingest.load(Ordering::Acquire) {
+                    if let Some(frame) = tokio::task::block_in_place(|| {
+                        recv.recv_video_gpu_timeout(Duration::from_millis(5))
+                    }) {
+                        ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
+                        got_any = true;
+                    }
+                    while let Some(frame) = recv.try_recv_video_gpu() {
+                        ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
+                        got_any = true;
+                    }
+                } else {
+                    // Drop already-decoded GPU frames without a wgpu copy.
+                    while recv.try_recv_video_gpu().is_some() {}
+                    if !got_any {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
                 }
             }
         } else if let Some(recv) = receiver.as_ref() {
@@ -532,23 +561,11 @@ async fn worker_loop(
                 got_any = true;
             }
         }
+        got_any |= drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
+
         let Some(recv) = receiver.as_ref() else {
             continue;
         };
-        while let Some(packet) = recv.try_recv_audio() {
-            playout.push_audio(
-                packet.timestamp,
-                Arc::clone(&packet.pcm_planar_f32),
-                packet.channels,
-                packet.samples_per_channel,
-                packet.sample_rate,
-            );
-            got_any = true;
-        }
-        while let Some(meta) = recv.try_recv_metadata() {
-            push_log(&latest, "metadata", meta.xml.to_string());
-            got_any = true;
-        }
 
         if !got_any {
             stall.lock().tick();
@@ -559,13 +576,44 @@ async fn worker_loop(
         *latest.session_state.lock() = state;
         if state != prev {
             push_log(latest.as_ref(), "session", format!("{state:?}"));
+            if state == SessionState::Connected {
+                *latest.error.lock() = None;
+            }
         }
-        if let Some(err) = recv.last_error() {
+        if state != SessionState::Connected
+            && let Some(err) = recv.last_error()
+        {
             *latest.error.lock() = Some(err);
         }
         playout.release(&latest, &audio);
         publish_buffer_delays(&latest, &playout);
     }
+}
+
+fn drain_audio_and_meta(
+    recv: Option<&ReceiverSession>,
+    latest: &LatestVideo,
+    playout: &mut Playout,
+) -> bool {
+    let Some(recv) = recv else {
+        return false;
+    };
+    let mut got_any = false;
+    while let Some(packet) = recv.try_recv_audio() {
+        playout.push_audio(
+            packet.timestamp,
+            Arc::clone(&packet.pcm_planar_f32),
+            packet.channels,
+            packet.samples_per_channel,
+            packet.sample_rate,
+        );
+        got_any = true;
+    }
+    while let Some(meta) = recv.try_recv_metadata() {
+        push_log(latest, "metadata", meta.xml.to_string());
+        got_any = true;
+    }
+    got_any
 }
 
 fn ingest_video(
@@ -675,7 +723,7 @@ async fn apply_connect(
     *latest.counters.lock() = ReceiveCounters::default();
     *latest.audio_levels.lock() = AudioLevels::default();
     latest.metadata_log.lock().clear();
-    audio.clear();
+    audio.reopen();
     playout.reset();
     publish_buffer_delays(latest, playout);
     stall.lock().reset();

@@ -155,6 +155,9 @@ struct MonitorApp {
     settings: MonitorSettings,
     buffer_edit: BufferEditState,
     fullscreen: bool,
+    /// eframe skips `ui` while minimized/occluded; ingest still runs in `logic`.
+    window_hidden: bool,
+    last_got_frame: bool,
     last_theme_dark: Option<bool>,
     simd_summary: String,
     sidebar_w: f32,
@@ -185,6 +188,7 @@ impl MonitorApp {
         settings.video_decode = settings::decode_path_from_config(layout.video_decode);
         worker.set_buffer(settings.buffer);
         worker.set_audio_boost_db(settings.audio_boost_db);
+        worker.set_audio_volume_pct(settings.audio_volume_pct);
         if let Some(url) = &initial_url {
             let (quality, preview) = settings.quality.to_connect_parts();
             worker.connect_with(ConnectOptions {
@@ -272,6 +276,8 @@ impl MonitorApp {
             settings,
             buffer_edit: BufferEditState::default(),
             fullscreen: false,
+            window_hidden: false,
+            last_got_frame: false,
             last_theme_dark: None,
             simd_summary: SimdCapabilities::detect().summary(),
             sidebar_w: clamp_sidebar_w(layout.sidebar_w as f32),
@@ -355,8 +361,10 @@ impl MonitorApp {
                 entry.kind,
                 entry.text
             );
-            self.log_lines.clear();
             self.log_lines.push_back(line);
+            while self.log_lines.len() > 128 {
+                self.log_lines.pop_front();
+            }
         }
     }
 
@@ -444,6 +452,28 @@ impl MonitorApp {
         self.held_gpu_texture = None;
     }
 
+    fn rebind_held_gpu_texture(&mut self) {
+        let Some(tex) = self.held_gpu_texture.as_ref() else {
+            return;
+        };
+        let Some(state) = self.wgpu_state.as_ref() else {
+            return;
+        };
+        let Some(id) = self.native_video_id else {
+            return;
+        };
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        state
+            .renderer
+            .write()
+            .update_egui_texture_from_wgpu_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            );
+    }
+
     pub(crate) fn has_video(&self) -> bool {
         (self.native_video_id.is_some() || self.texture.is_some())
             && self.frame_w > 0
@@ -455,16 +485,20 @@ impl MonitorApp {
             .or_else(|| self.texture.as_ref().map(|tex| tex.id()))
     }
 
-    fn on_tick(&mut self, ctx: &Context) -> bool {
+    fn on_tick(&mut self, ctx: &Context, ingest_gpu: bool) -> bool {
         self.poll_discovery();
         if !self.discovering && self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.request_refresh(true);
         }
         self.ingest_logs();
-        let mut got_frame = self.ingest_gpu_frame();
-        if got_frame {
-            self.prep_ctrl.slot.store(None);
-        } else {
+        let mut got_frame = false;
+        if ingest_gpu {
+            got_frame = self.ingest_gpu_frame();
+            if got_frame {
+                self.prep_ctrl.slot.store(None);
+            }
+        }
+        if !got_frame {
             got_frame = self.ingest_prepared_frame(ctx);
             if got_frame {
                 self.clear_native_video();
@@ -520,15 +554,15 @@ impl MonitorApp {
                 self.status = "Connecting…".into();
             }
             SessionState::Reconnecting => {
-                self.status = format!("Reconnecting… ({})", self.reconnects);
+                self.status = match self.worker.latest().error.lock().clone() {
+                    Some(err) if !err.is_empty() => {
+                        format!("Reconnecting… ({}) — {err}", self.reconnects)
+                    }
+                    _ => format!("Reconnecting… ({})", self.reconnects),
+                };
             }
             SessionState::Connected => {
-                if let Some(err) = self.worker.latest().error.lock().clone() {
-                    if !err.is_empty() {
-                        self.status = err;
-                    }
-                } else if self.status.starts_with("Connecting")
-                    || self.status.starts_with("Reconnecting")
+                if self.status.starts_with("Connecting") || self.status.starts_with("Reconnecting")
                 {
                     self.status.clear();
                 }
@@ -635,6 +669,12 @@ impl MonitorApp {
     fn set_audio_boost_db(&mut self, db: i32) {
         self.settings.audio_boost_db = db;
         self.worker.set_audio_boost_db(db);
+    }
+
+    fn set_audio_volume_pct(&mut self, pct: i32) {
+        self.settings.audio_volume_pct = pct.clamp(0, 100);
+        self.worker
+            .set_audio_volume_pct(self.settings.audio_volume_pct);
     }
 
     fn set_video_delay(&mut self, delay: DelaySetting) {
@@ -817,6 +857,7 @@ impl MonitorApp {
                 );
             }
             PrefsAction::SetBoost(db) => self.set_audio_boost_db(db),
+            PrefsAction::SetVolume(pct) => self.set_audio_volume_pct(pct),
             PrefsAction::SetQuality(preset) => {
                 self.settings.quality = preset;
                 self.reapply_connection();
@@ -883,10 +924,28 @@ impl MonitorApp {
 }
 
 impl eframe::App for MonitorApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // While the window is occluded, eframe skips `ui` / present and only
+        // calls this. Video ingest used to live in `ui`, so the picture froze
+        // until the window was shown again (audio kept playing on its thread).
+        self.apply_theme_if_needed(ctx);
+        let hidden = ctx.input(|i| i.viewport().visible() == Some(false));
+        let became_visible = self.window_hidden && !hidden;
+        self.window_hidden = hidden;
+        // Pause wgpu copies in the receive worker while occluded. The previous
+        // 16ms hidden repaint still submitted GPU work with no present, which
+        // wedged the shared device and made the OMT sockets flap (Reconnects).
+        self.worker.set_gpu_ingest(!hidden);
+        if became_visible {
+            self.rebind_held_gpu_texture();
+            ctx.request_repaint();
+        }
+        self.last_got_frame = self.on_tick(ctx, !hidden);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.apply_theme_if_needed(&ctx);
-        let got_frame = self.on_tick(&ctx);
+        let got_frame = self.last_got_frame;
 
         // Escape / F11 fullscreen handling
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -937,11 +996,8 @@ impl eframe::App for MonitorApp {
         }
 
         // Repaint when a prepared frame arrives (prep thread also requests).
-        // VU meters only need ~30 Hz — continuous full-rate paints starve the GPU path.
         if got_frame || self.preferences_open {
             ctx.request_repaint();
-        } else if connected && self.settings.vu_meter {
-            ctx.request_repaint_after(Duration::from_millis(33));
         } else if connected || self.fullscreen {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else {

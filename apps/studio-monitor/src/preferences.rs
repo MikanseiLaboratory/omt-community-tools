@@ -57,6 +57,7 @@ pub enum PrefsAction {
     SetAudioDelayMs(u32),
     SetBufferLink(bool),
     SetBoost(i32),
+    SetVolume(i32),
     SetQuality(VideoQualityPreset),
     SetVideoDecode(omt_media::VideoDecodePath),
     SetAlpha(bool),
@@ -243,6 +244,23 @@ pub fn show(
 
                     ui.add_space(12.0);
                     section_title(ui, chrome, t(language, "monitor.audio"));
+                    ui.label(
+                        RichText::new(t(language, "monitor.audio_volume"))
+                            .small()
+                            .color(chrome.text_muted),
+                    );
+                    ui.horizontal(|ui| {
+                        let mut volume = settings.audio_volume_pct;
+                        let resp = ui.add(
+                            egui::Slider::new(&mut volume, 0..=100)
+                                .suffix("%")
+                                .show_value(true),
+                        );
+                        if resp.changed() {
+                            action = Some(PrefsAction::SetVolume(volume));
+                        }
+                    });
+                    ui.add_space(8.0);
                     ui.label(
                         RichText::new(t(language, "monitor.audio_boost"))
                             .small()
