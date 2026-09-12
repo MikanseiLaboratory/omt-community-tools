@@ -1,5 +1,5 @@
 # Build release sidecars/tools and run reproducible VMX / monitor-bench baselines.
-# Usage (from omt-tools root):
+# Usage (from omt-community-tools root):
 #   powershell -File scripts/bench/run-baseline.ps1
 #   powershell -File scripts/bench/run-baseline.ps1 -Native
 #   powershell -File scripts/bench/run-baseline.ps1 -Width 1920 -Height 1080 -Iters 20
@@ -39,7 +39,7 @@ try {
     Pop-Location
 }
 
-Write-Host "==> Building omt-tools monitor-bench ($tag)"
+Write-Host "==> Building omt-community-tools monitor-bench ($tag)"
 cargo build --release -p monitor-bench -p omt-test-patterns 2>&1 | Tee-Object -FilePath $outFile -Append
 
 Write-Host "Results written to $outFile"

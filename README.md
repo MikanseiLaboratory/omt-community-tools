@@ -1,7 +1,7 @@
 # OMT Community Tools
 
-[![CI](https://github.com/MikanseiLaboratory/omt-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-tools/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-tools/releases/latest)
+[![CI](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-community-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-community-tools/releases/latest)
 
 Open Media Transport production utilities made by [MikanseiLaboratory](https://github.com/MikanseiLaboratory).
 

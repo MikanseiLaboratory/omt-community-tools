@@ -993,12 +993,12 @@ impl MonitorApp {
             PrefsAction::EnterFullscreen => self.enter_fullscreen(ctx),
             PrefsAction::OpenHelp => {
                 ctx.open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/MikanseiLaboratory/omt-tools#readme",
+                    "https://github.com/MikanseiLaboratory/omt-community-tools#readme",
                 ));
             }
             PrefsAction::OpenLicense => {
                 ctx.open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/MikanseiLaboratory/omt-tools/blob/main/LICENSE",
+                    "https://github.com/MikanseiLaboratory/omt-community-tools/blob/main/LICENSE",
                 ));
             }
             PrefsAction::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
