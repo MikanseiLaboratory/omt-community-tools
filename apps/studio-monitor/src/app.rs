@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use eframe::egui::{self, Context, Pos2, TextureHandle, TextureId, TextureOptions};
+use eframe::egui::{self, ColorImage, Context, Pos2, TextureHandle, TextureId, TextureOptions};
 use eframe::egui_wgpu::{RenderState, WgpuSetup, wgpu};
 use omt_media::{
     AudioLevels, AudioOutputDevice, AudioOutputStatus, BufferUnit, ConnectOptions, DelaySetting,
@@ -22,7 +22,7 @@ use suite_core::{
 };
 
 use crate::chrome::UiChrome;
-use crate::frame_prep::{FramePrep, PrepControl, PreparedFrame};
+use crate::frame_prep::{FramePrep, PrepControl};
 use crate::preferences::{self, BufferEditState, PrefsAction};
 use crate::settings::{self, MonitorSettings};
 
@@ -166,6 +166,8 @@ struct MonitorApp {
     stats_video_open: bool,
     stats_audio_open: bool,
     stats_source_open: bool,
+    /// Row-padded staging for `queue.write_texture` (256-byte alignment).
+    cpu_upload_pad: Vec<u8>,
 }
 
 impl MonitorApp {
@@ -181,6 +183,7 @@ impl MonitorApp {
         let gpu = wgpu_state.as_ref().map(|state| GpuVideoContext {
             device: Arc::new(state.device.clone()),
             queue: Arc::new(state.queue.clone()),
+            gpu_lock: None,
         });
         let worker = ReceiveWorker::spawn();
         worker.set_gpu(gpu);
@@ -286,6 +289,7 @@ impl MonitorApp {
             stats_video_open: layout.stats_video_open,
             stats_audio_open: layout.stats_audio_open,
             stats_source_open: layout.stats_source_open,
+            cpu_upload_pad: Vec::new(),
         };
         app.buffer_edit.sync_from(
             app.settings.buffer,
@@ -372,26 +376,28 @@ impl MonitorApp {
         let Some(frame) = self.prep_ctrl.take_prepared() else {
             return false;
         };
-        let frame = Arc::try_unwrap(frame).unwrap_or_else(|arc| PreparedFrame {
-            image: arc.image.clone(),
-            fps_n: arc.fps_n,
-            fps_d: arc.fps_d,
-        });
-        self.frame_w = frame.image.width() as u32;
-        self.frame_h = frame.image.height() as u32;
+        self.frame_w = frame.width;
+        self.frame_h = frame.height;
         self.fps_n = frame.fps_n;
         self.fps_d = frame.fps_d.max(1);
         self.window_fps_count += 1;
         self.last_frame_at = Some(Instant::now());
 
-        let size = frame.image.size;
-        match &mut self.texture {
-            Some(tex) if tex.size() == size => {
-                tex.set(frame.image, TextureOptions::LINEAR);
-            }
-            _ => {
-                self.texture =
-                    Some(ctx.load_texture("omt-video", frame.image, TextureOptions::LINEAR));
+        if self.upload_cpu_pixels_native(&frame.pixels, frame.width, frame.height, frame.rgba) {
+            self.texture = None;
+        } else {
+            self.clear_native_video();
+            let image =
+                color_image_from_pixels(&frame.pixels, frame.width, frame.height, frame.rgba);
+            let size = image.size;
+            match &mut self.texture {
+                Some(tex) if tex.size() == size => {
+                    tex.set(image, TextureOptions::LINEAR);
+                }
+                _ => {
+                    self.texture =
+                        Some(ctx.load_texture("omt-video", image, TextureOptions::LINEAR));
+                }
             }
         }
         self.frames_presented = self
@@ -402,6 +408,118 @@ impl MonitorApp {
             .prep_ctrl
             .skipped
             .load(std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    fn upload_cpu_pixels_native(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        rgba: bool,
+    ) -> bool {
+        let Some(state) = self.wgpu_state.clone() else {
+            return false;
+        };
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let expected = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        if pixels.len() < expected {
+            return false;
+        }
+        let format = if rgba {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Bgra8Unorm
+        };
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let recreate = match self.held_gpu_texture.as_ref() {
+            Some(tex) => {
+                tex.size().width != width || tex.size().height != height || tex.format() != format
+            }
+            None => true,
+        };
+        if recreate {
+            self.held_gpu_texture = Some(state.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("omt-cpu-video"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }));
+        }
+        let src_row = width.saturating_mul(4);
+        let padded_row = padded_bytes_per_row(width);
+        let src = &pixels[..expected];
+        let padded = padded_row != src_row;
+        if padded {
+            let padded_len = padded_row as usize * height as usize;
+            if self.cpu_upload_pad.len() != padded_len {
+                self.cpu_upload_pad.resize(padded_len, 0);
+            }
+            for y in 0..height as usize {
+                let src_off = y * src_row as usize;
+                let dst_off = y * padded_row as usize;
+                self.cpu_upload_pad[dst_off..dst_off + src_row as usize]
+                    .copy_from_slice(&src[src_off..src_off + src_row as usize]);
+            }
+        }
+        let view = {
+            let Some(tex) = self.held_gpu_texture.as_ref() else {
+                return false;
+            };
+            let data: &[u8] = if padded { &self.cpu_upload_pad } else { src };
+            state.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(if padded { padded_row } else { src_row }),
+                    rows_per_image: Some(height),
+                },
+                size,
+            );
+            tex.create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let mut renderer = state.renderer.write();
+        if recreate {
+            if let Some(id) = self.native_video_id.take() {
+                renderer.free_texture(&id);
+            }
+            self.native_video_id = Some(renderer.register_native_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+            ));
+        } else if let Some(id) = self.native_video_id {
+            renderer.update_egui_texture_from_wgpu_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            );
+        } else {
+            self.native_video_id = Some(renderer.register_native_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+            ));
+        }
         true
     }
 
@@ -500,9 +618,6 @@ impl MonitorApp {
         }
         if !got_frame {
             got_frame = self.ingest_prepared_frame(ctx);
-            if got_frame {
-                self.clear_native_video();
-            }
         }
 
         {
@@ -878,12 +993,12 @@ impl MonitorApp {
             PrefsAction::EnterFullscreen => self.enter_fullscreen(ctx),
             PrefsAction::OpenHelp => {
                 ctx.open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/MikanseiLaboratory/omt-tools#readme",
+                    "https://github.com/MikanseiLaboratory/omt-community-tools#readme",
                 ));
             }
             PrefsAction::OpenLicense => {
                 ctx.open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/MikanseiLaboratory/omt-tools/blob/main/LICENSE",
+                    "https://github.com/MikanseiLaboratory/omt-community-tools/blob/main/LICENSE",
                 ));
             }
             PrefsAction::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -995,14 +1110,41 @@ impl eframe::App for MonitorApp {
             self.apply_prefs_action(action, &ctx);
         }
 
-        // Repaint when a prepared frame arrives (prep thread also requests).
-        if got_frame || self.preferences_open {
+        // New video already wakes the event loop from the prep thread.
+        // A 16 ms connected timer was tessellating the full CJK chrome at
+        // 60 Hz even when the picture did not change, which starved other apps.
+        if got_frame {
             ctx.request_repaint();
-        } else if connected || self.fullscreen {
-            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.preferences_open || connected || self.fullscreen {
+            ctx.request_repaint_after(Duration::from_millis(50));
         } else {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+fn padded_bytes_per_row(width: u32) -> u32 {
+    let row = width.saturating_mul(4);
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    row.div_ceil(align) * align
+}
+
+fn color_image_from_pixels(pixels: &[u8], width: u32, height: u32, rgba: bool) -> ColorImage {
+    let expected = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    let src = if pixels.len() >= expected {
+        &pixels[..expected]
+    } else {
+        pixels
+    };
+    let size = [width as usize, height as usize];
+    if rgba {
+        ColorImage::from_rgba_premultiplied(size, src)
+    } else {
+        let mut rgba_buf = vec![0u8; expected];
+        omt_media::bgra_to_rgba_into(src, &mut rgba_buf);
+        ColorImage::from_rgba_premultiplied(size, &rgba_buf)
     }
 }
 

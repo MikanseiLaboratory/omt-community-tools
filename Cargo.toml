@@ -23,7 +23,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.97"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
@@ -34,9 +34,9 @@ suite-core = { path = "crates/suite-core" }
 omt-media = { path = "crates/omt-media" }
 pattern-generator = { path = "crates/pattern-generator" }
 monitor-bench = { path = "crates/monitor-bench" }
-openmediatransport = { git = "https://github.com/MikanseiLaboratory/openmediatransport-rs", rev = "160ec0db5d63792501b9b7469464688902d30549", features = ["tokio", "wgpu"] }
+openmediatransport = { git = "https://github.com/MikanseiLaboratory/openmediatransport-rs", rev = "7711da45e2ed83330c2e1fced06c5d1673e4d502", features = ["tokio", "wgpu"] }
 gpui = "0.2.2"
-vmx = { git = "https://github.com/MikanseiLaboratory/vmx-rs", features = ["wgpu"] }
+vmx = { git = "https://github.com/MikanseiLaboratory/vmx-rs", rev = "b9a0fd19226e3e2ebf4041a2b119b855e71d9ca3", features = ["wgpu"] }
 wgpu = "30"
 anyhow = "1"
 thiserror = "2"

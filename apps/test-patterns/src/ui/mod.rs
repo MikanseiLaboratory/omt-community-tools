@@ -15,7 +15,7 @@ use gpui::{
 };
 use omt_media::{
     AudioToneConfig, MAX_VIDEO_FRAME_BUFFER_FRAMES, MIN_VIDEO_FRAME_BUFFER_FRAMES, SendSession,
-    SendSessionConfig, SendStats, clamp_video_frame_buffer_frames,
+    SendSessionConfig, SendStats, clamp_video_frame_buffer_frames, uniquify_local_source_name,
 };
 use openmediatransport::{Quality, uyvy_to_rgba};
 use parking_lot::Mutex;
@@ -121,6 +121,8 @@ pub fn run_gpui(title: String, language: Language) -> Result<()> {
 struct PatternsView {
     language: Language,
     name: String,
+    /// Advertised name for the current send (`Name (2)` when the host already has `Name`).
+    on_air_name: Option<String>,
     kind: PatternKind,
     width: i32,
     height: i32,
@@ -193,6 +195,7 @@ impl PatternsView {
         let mut view = Self {
             language,
             name: saved_cfg.name.clone(),
+            on_air_name: None,
             kind: PatternKind::SmpteColorBars,
             width: saved_cfg.width,
             height: saved_cfg.height,
@@ -840,8 +843,11 @@ impl PatternsView {
             buf
         });
 
+        let advertised = uniquify_local_source_name(&self.name);
+        self.on_air_name = Some(advertised.clone());
+
         let config = SendSessionConfig {
-            name: self.name.clone(),
+            name: advertised,
             width: self.width,
             height: self.height,
             fps_n: self.frame_rate.n,
@@ -854,7 +860,10 @@ impl PatternsView {
 
         match SendSession::start(config, provider) {
             Ok(session) => self.session = Some(session),
-            Err(e) => self.error = Some(SharedString::from(e.to_string())),
+            Err(e) => {
+                self.on_air_name = None;
+                self.error = Some(SharedString::from(e.to_string()));
+            }
         }
     }
 
@@ -862,6 +871,7 @@ impl PatternsView {
         if let Some(mut session) = self.session.take() {
             session.stop();
         }
+        self.on_air_name = None;
     }
 
     fn refresh_preview(&mut self, cx: &mut Context<Self>) {
@@ -938,7 +948,10 @@ impl Render for PatternsView {
         let error = self.error.clone();
         let sending = self.session.is_some();
         let title = self.window_title.clone();
-        let name = self.name.clone();
+        let name = self
+            .on_air_name
+            .clone()
+            .unwrap_or_else(|| self.name.clone());
         let name_editing = self.name_editing;
         let width = self.width;
         let height = self.height;

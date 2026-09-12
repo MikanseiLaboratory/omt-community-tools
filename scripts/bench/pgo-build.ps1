@@ -1,7 +1,7 @@
 # Optional PGO build for OMT sidecars / monitor-bench.
 # Does NOT modify Cargo.toml profiles permanently.
 #
-# Usage (from omt-tools root, developer machine only):
+# Usage (from omt-community-tools root, developer machine only):
 #   powershell -File scripts/bench/pgo-build.ps1
 #   powershell -File scripts/bench/pgo-build.ps1 -TrainSeconds 20
 #

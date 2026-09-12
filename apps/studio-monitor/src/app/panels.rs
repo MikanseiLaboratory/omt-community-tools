@@ -10,6 +10,11 @@ use super::{
 };
 use crate::chrome::UiChrome;
 
+/// Fixed row height so the log ScrollArea only shapes on-screen lines.
+const LOG_ROW_H: f32 = 16.0;
+/// Cap CJK shaping cost for long per-frame metadata XML.
+const LOG_LINE_CHARS: usize = 240;
+
 impl MonitorApp {
     pub(crate) fn ui_fullscreen(&mut self, ui: &mut egui::Ui, ctx: &Context, chrome: UiChrome) {
         egui::CentralPanel::default()
@@ -567,7 +572,7 @@ impl MonitorApp {
                 egui::ScrollArea::vertical()
                     .id_salt("monitor_log")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show_rows(ui, LOG_ROW_H, self.log_lines.len().max(1), |ui, rows| {
                         ui.set_min_width(ui.available_width());
                         if self.log_lines.is_empty() {
                             ui.label(
@@ -576,10 +581,17 @@ impl MonitorApp {
                                     .italics()
                                     .small(),
                             );
-                        } else {
-                            for line in &self.log_lines {
-                                ui.monospace(RichText::new(line).color(chrome.text_muted).small());
-                            }
+                            return;
+                        }
+                        for i in rows {
+                            let Some(line) = self.log_lines.get(i) else {
+                                continue;
+                            };
+                            ui.monospace(
+                                RichText::new(truncate_log_line(line))
+                                    .color(chrome.text_muted)
+                                    .small(),
+                            );
                         }
                     });
             });
@@ -844,6 +856,13 @@ fn peak_to_meter(peak: f32) -> f32 {
     }
     let db = (20.0 * peak.log10()).clamp(FLOOR_DB, 0.0);
     ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
+}
+
+fn truncate_log_line(line: &str) -> &str {
+    match line.char_indices().nth(LOG_LINE_CHARS) {
+        Some((idx, _)) => &line[..idx],
+        None => line,
+    }
 }
 
 fn format_dbfs(peak: f32) -> String {

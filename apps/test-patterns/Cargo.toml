@@ -20,6 +20,6 @@ omt-media.workspace = true
 openmediatransport.workspace = true
 parking_lot.workspace = true
 pattern-generator.workspace = true
-rfd = "0.15"
+rfd = "0.17"
 smallvec = "1"
 suite-core.workspace = true

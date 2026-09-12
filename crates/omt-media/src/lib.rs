@@ -16,7 +16,10 @@ pub use audio_out::{
     AudioLevels, AudioOutput, AudioOutputDevice, AudioOutputStatus, list_output_devices,
 };
 pub use color::{rgb_to_uyvy_pixel, uyvy_from_rgb_frame};
-pub use discovery::{DiscoveredSource, SourceBrowser, discover_sources, spawn_discover};
+pub use discovery::{
+    DiscoveredSource, SourceBrowser, discover_sources, spawn_discover, uniquify_local_source_name,
+    uniquify_source_name,
+};
 pub use playout::{BufferSettings, BufferUnit, DelaySetting};
 pub use receive::{
     ConnectOptions, LatestVideo, MetadataLogEntry, ReceiveCounters, ReceiveWorker, VideoDecodePath,
