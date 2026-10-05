@@ -189,6 +189,9 @@ pub struct Playout {
     wall_origin: Option<Instant>,
     /// Soft correction applied on top of the wall clock (100 ns ticks).
     clock_skew_ticks: i64,
+    /// Subtracted from video PTS when the source clock runs far ahead of the
+    /// media clock (100 ns ticks). Audio keeps the unscaled clock.
+    video_pts_offset: i64,
     fps_n: i32,
     fps_d: i32,
     video_q: VecDeque<QueuedVideo>,
@@ -203,6 +206,7 @@ impl Default for Playout {
             pts_origin: None,
             wall_origin: None,
             clock_skew_ticks: 0,
+            video_pts_offset: 0,
             fps_n: 30,
             fps_d: 1,
             video_q: VecDeque::new(),
@@ -318,6 +322,7 @@ impl Playout {
         self.pts_origin = None;
         self.wall_origin = None;
         self.clock_skew_ticks = 0;
+        self.video_pts_offset = 0;
         while let Some(frame) = self.video_q.pop_front() {
             self.recycle_queued(frame);
         }
@@ -441,25 +446,32 @@ impl Playout {
     }
 
     fn release_video(&mut self, latest: &LatestVideo, video_mt: i64) {
+        // A source whose video timescale is wrong (observed: CMAF video PTS
+        // advancing ~1000× real time) sits forever in the future of the audio
+        // clock. Pull only that gap onto the clock and present the frame.
+        // Frames inside the configured buffer stay queued.
+        self.absorb_early_video(video_mt);
+
         let frame_ticks = self.frame_duration_ticks();
         let late_thresh = video_mt.saturating_sub(frame_ticks.saturating_mul(2));
 
         let Some(front) = self.video_q.front() else {
             return;
         };
-        if front.timestamp() > video_mt {
+        let front_ts = self.video_time(front.timestamp());
+        if front_ts > video_mt {
             return;
         }
 
         let mut due: Option<QueuedVideo> = None;
         let mut replaced = 0u64;
 
-        if front.timestamp() < late_thresh {
+        if front_ts < late_thresh {
             // Badly behind: keep the newest due frame only.
             while self
                 .video_q
                 .front()
-                .is_some_and(|f| f.timestamp() <= video_mt)
+                .is_some_and(|f| self.video_time(f.timestamp()) <= video_mt)
             {
                 if let Some(old) = due.take() {
                     replaced += 1;
@@ -477,6 +489,21 @@ impl Playout {
             Some(QueuedVideo::Cpu(video)) => latest.publish_video(video, replaced),
             Some(QueuedVideo::Gpu(video)) => latest.publish_gpu_video(video, replaced),
             None => {}
+        }
+    }
+
+    fn video_time(&self, raw: i64) -> i64 {
+        raw.saturating_sub(self.video_pts_offset)
+    }
+
+    fn absorb_early_video(&mut self, video_mt: i64) {
+        let Some(front) = self.video_q.front() else {
+            return;
+        };
+        let early = self.video_time(front.timestamp()).saturating_sub(video_mt);
+        let limit = i64::from(self.video_delay_ms()).saturating_add(1_000) * TICKS_PER_MS;
+        if early > limit {
+            self.video_pts_offset = self.video_pts_offset.saturating_add(early);
         }
     }
 
@@ -573,6 +600,7 @@ impl Playout {
             self.pts_origin = Some(oldest);
             self.wall_origin = Some(Instant::now());
             self.clock_skew_ticks = 0;
+            self.video_pts_offset = 0;
             audio.invalidate_playhead();
             return;
         }
@@ -585,7 +613,44 @@ impl Playout {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::audio_out::AudioOutput;
+    use crate::receive::{LatestVideo, VideoFrame};
+
+    fn video_at(timestamp: i64) -> VideoFrame {
+        VideoFrame {
+            width: 2,
+            height: 2,
+            bgra: Arc::from([0u8; 16]),
+            timestamp,
+            fps_n: 60,
+            fps_d: 1,
+        }
+    }
+
+    fn zero_buffer() -> BufferSettings {
+        let mut settings = BufferSettings::default();
+        settings.set_linked(false, 60, 1);
+        settings.set_video(
+            DelaySetting {
+                amount: 0,
+                unit: BufferUnit::Milliseconds,
+            },
+            60,
+            1,
+        );
+        settings.set_audio(
+            DelaySetting {
+                amount: 0,
+                unit: BufferUnit::Milliseconds,
+            },
+            60,
+            1,
+        );
+        settings
+    }
 
     #[test]
     fn frames_convert_to_ms() {
@@ -642,5 +707,39 @@ mod tests {
         assert!(s.linked);
         assert_eq!(s.video_delay_ms(30, 1), 200);
         assert_eq!(s.audio_delay_ms(30, 1), 200);
+    }
+
+    #[test]
+    fn video_clock_far_ahead_of_audio_still_presents() {
+        let mut playout = Playout::default();
+        playout.set_settings(zero_buffer());
+        let latest = LatestVideo::default();
+        let audio = AudioOutput::new();
+        // test-moq-1: audio ~117s, video ~1000× that, stepping ~16.7s per frame.
+        let audio_ts = 1_172_470_000i64;
+        let video_ts = 1_163_667_004_500i64;
+        playout.push_audio(audio_ts, Arc::from([0u8; 8]), 2, 1, 48_000);
+        playout.push_video(video_at(video_ts));
+        playout.release(&latest, &audio);
+        let first = latest.take().expect("future video must present");
+        assert_eq!(first.timestamp, video_ts);
+
+        let step = 167_000_160i64;
+        playout.push_video(video_at(video_ts + step));
+        playout.release(&latest, &audio);
+        let second = latest.take().expect("next scaled frame must present");
+        assert_eq!(second.timestamp, video_ts + step);
+    }
+
+    #[test]
+    fn video_inside_buffer_stays_queued() {
+        let mut playout = Playout::default();
+        playout.set_settings(zero_buffer());
+        let latest = LatestVideo::default();
+        let audio = AudioOutput::new();
+        playout.push_audio(0, Arc::from([0u8; 8]), 2, 1, 48_000);
+        playout.push_video(video_at(1_000_000));
+        playout.release(&latest, &audio);
+        assert!(latest.take().is_none());
     }
 }
