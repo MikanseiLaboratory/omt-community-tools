@@ -74,6 +74,16 @@ impl DelaySetting {
     }
 }
 
+/// How received packets are released to the display and speakers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayoutMode {
+    /// Hold each packet until its timestamp reaches the shared media clock.
+    #[default]
+    Synced,
+    /// Present video and audio as they arrive, without timestamp sync.
+    Immediate,
+}
+
 /// User-facing A/V buffer depth (linked or independent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferSettings {
@@ -83,6 +93,8 @@ pub struct BufferSettings {
     pub video: DelaySetting,
     /// Audio playout delay.
     pub audio: DelaySetting,
+    /// Timestamp gate, or present packets on arrival.
+    pub mode: PlayoutMode,
 }
 
 impl Default for BufferSettings {
@@ -98,6 +110,7 @@ impl Default for BufferSettings {
                 amount: 200,
                 unit: BufferUnit::Milliseconds,
             },
+            mode: PlayoutMode::Synced,
         }
     }
 }
@@ -410,6 +423,11 @@ impl Playout {
 
     /// Release packets whose PTS is due on the (possibly split) media clock.
     pub fn release(&mut self, latest: &LatestVideo, audio: &AudioOutput) {
+        if self.settings.mode == PlayoutMode::Immediate {
+            self.release_immediate(latest, audio);
+            return;
+        }
+
         self.steer_clock_to_audio_ring(audio);
 
         let audio_delay = self.audio_delay_ms();
@@ -426,17 +444,7 @@ impl Playout {
             let Some(packet) = self.audio_q.pop_front() else {
                 break;
             };
-            audio.push_planar_f32(
-                packet.data.as_ref(),
-                packet.channels,
-                packet.samples,
-                packet.sample_rate,
-                packet.timestamp,
-            );
-            let levels = audio.levels();
-            *latest.audio_levels.lock() = levels;
-            let mut counters = latest.counters.lock();
-            counters.audio_frames = levels.frames;
+            self.emit_audio(latest, audio, packet);
         }
 
         self.release_video(latest, video_mt);
@@ -485,6 +493,41 @@ impl Playout {
             due = self.video_q.pop_front();
         }
 
+        self.publish_due(latest, due, replaced);
+    }
+
+    /// Present every queued packet now. Timestamps are not a gate.
+    fn release_immediate(&mut self, latest: &LatestVideo, audio: &AudioOutput) {
+        while let Some(packet) = self.audio_q.pop_front() {
+            self.emit_audio(latest, audio, packet);
+        }
+        let mut due = None;
+        let mut replaced = 0u64;
+        while let Some(frame) = self.video_q.pop_front() {
+            if let Some(old) = due.take() {
+                replaced += 1;
+                self.recycle_queued(old);
+            }
+            due = Some(frame);
+        }
+        self.publish_due(latest, due, replaced);
+    }
+
+    fn emit_audio(&self, latest: &LatestVideo, audio: &AudioOutput, packet: PendingAudio) {
+        audio.push_planar_f32(
+            packet.data.as_ref(),
+            packet.channels,
+            packet.samples,
+            packet.sample_rate,
+            packet.timestamp,
+        );
+        let levels = audio.levels();
+        *latest.audio_levels.lock() = levels;
+        let mut counters = latest.counters.lock();
+        counters.audio_frames = levels.frames;
+    }
+
+    fn publish_due(&self, latest: &LatestVideo, due: Option<QueuedVideo>, replaced: u64) {
         match due {
             Some(QueuedVideo::Cpu(video)) => latest.publish_video(video, replaced),
             Some(QueuedVideo::Gpu(video)) => latest.publish_gpu_video(video, replaced),
@@ -741,5 +784,24 @@ mod tests {
         playout.push_video(video_at(1_000_000));
         playout.release(&latest, &audio);
         assert!(latest.take().is_none());
+    }
+
+    #[test]
+    fn immediate_presents_packets_ahead_of_the_clock() {
+        let mut settings = zero_buffer();
+        settings.mode = PlayoutMode::Immediate;
+        let mut playout = Playout::default();
+        playout.set_settings(settings);
+        let latest = LatestVideo::default();
+        let audio = AudioOutput::new();
+        playout.push_audio(0, Arc::from([0u8; 8]), 2, 1, 48_000);
+        playout.release(&latest, &audio);
+        let frames_after_origin = audio.levels().frames;
+
+        playout.push_audio(5_000_000_000, Arc::from([0u8; 8]), 2, 1, 48_000);
+        playout.push_video(video_at(1_000_000));
+        playout.release(&latest, &audio);
+        assert!(latest.take().is_some());
+        assert!(audio.levels().frames > frames_after_origin);
     }
 }

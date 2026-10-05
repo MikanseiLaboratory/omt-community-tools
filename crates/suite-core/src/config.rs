@@ -180,6 +180,17 @@ impl TestPatternsConfig {
     }
 }
 
+/// Studio Monitor playout gate stored in preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayoutMode {
+    /// Hold packets until their timestamps meet the media clock.
+    #[default]
+    Synced,
+    /// Present video and audio as they arrive, without timestamp sync.
+    Immediate,
+}
+
 /// VMX video decode backend stored in Studio Monitor preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -218,6 +229,9 @@ pub struct StudioMonitorConfig {
     /// VMX decode backend (`cpu` or `gpu`).
     #[serde(default)]
     pub video_decode: VideoDecodePath,
+    /// `synced` waits on timestamps. `immediate` presents packets on arrival.
+    #[serde(default)]
+    pub playout_mode: PlayoutMode,
 }
 
 impl Default for StudioMonitorConfig {
@@ -231,6 +245,7 @@ impl Default for StudioMonitorConfig {
             stats_audio_open: true,
             stats_source_open: true,
             video_decode: VideoDecodePath::Cpu,
+            playout_mode: PlayoutMode::Synced,
         }
     }
 }
@@ -484,6 +499,7 @@ mod tests {
         assert!(parsed.stats_audio_open);
         assert!(parsed.stats_source_open);
         assert_eq!(parsed.video_decode, VideoDecodePath::Cpu);
+        assert_eq!(parsed.playout_mode, PlayoutMode::Synced);
     }
 
     #[test]

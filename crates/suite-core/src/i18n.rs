@@ -213,6 +213,14 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "monitor.audio_unavailable_hint") => {
             "映像は再生を続けます。設定から別の出力デバイスを選んでください。"
         }
+        (Language::English, "monitor.playout_immediate") => "Present on arrival",
+        (Language::Japanese, "monitor.playout_immediate") => "受信したまま出す",
+        (Language::English, "monitor.playout_immediate_info") => {
+            "Video and audio are presented as they arrive, without timestamp sync."
+        }
+        (Language::Japanese, "monitor.playout_immediate_info") => {
+            "届いた映像と音声を、タイムスタンプでは揃えずにそのまま出します。"
+        }
         (Language::English, "monitor.av_buffer") => "A/V buffer",
         (Language::Japanese, "monitor.av_buffer") => "A/Vバッファ",
         (Language::English, "monitor.buffer_video") => "Video delay",
