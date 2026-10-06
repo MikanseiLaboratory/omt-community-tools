@@ -1,7 +1,7 @@
 //! Windowed / fullscreen chrome panels and layout splitters.
 
 use eframe::egui::{self, Color32, Context, CursorIcon, Pos2, Rect, RichText, Sense, Ui, Vec2};
-use omt_media::{AudioLevels, BufferUnit, DiscoveredSource};
+use omt_media::{AudioLevels, BufferUnit, DiscoveredSource, PlayoutMode};
 use suite_core::{Language, t};
 
 use super::{
@@ -926,6 +926,9 @@ fn format_buffer_stats(
     fps_n: i32,
     fps_d: i32,
 ) -> String {
+    if buffer.mode == PlayoutMode::Immediate {
+        return t(language, "monitor.playout_immediate").to_string();
+    }
     let v = format_video_delay_frames(language, buffer, video_ms, fps_n, fps_d);
     let a = format!("{audio_ms} ms");
     if buffer.linked {

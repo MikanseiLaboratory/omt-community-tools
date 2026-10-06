@@ -1,7 +1,7 @@
 //! Preferences modal — language, theme, viewer, audio, A/V buffer, version, license.
 
 use egui::{Color32, Context, RichText, Sense, Ui, Vec2};
-use omt_media::{AudioOutputDevice, BufferSettings};
+use omt_media::{AudioOutputDevice, BufferSettings, PlayoutMode};
 use suite_core::{Language, SUITE_VERSION, ThemePreference, t};
 
 use crate::chrome::UiChrome;
@@ -56,6 +56,7 @@ pub enum PrefsAction {
     SetVideoDelayFrames(u32),
     SetAudioDelayMs(u32),
     SetBufferLink(bool),
+    SetPlayoutMode(PlayoutMode),
     SetBoost(i32),
     SetVolume(i32),
     SetQuality(VideoQualityPreset),
@@ -335,45 +336,66 @@ pub fn show(
                     ui.add_space(12.0);
                     ui.separator();
                     section_title(ui, chrome, t(language, "monitor.av_buffer"));
+                    let immediate = buffer.mode == PlayoutMode::Immediate;
                     if toggle_row(
                         ui,
                         chrome,
-                        t(language, "monitor.buffer_link"),
-                        buffer.linked,
+                        t(language, "monitor.playout_immediate"),
+                        immediate,
                     ) {
-                        action = Some(PrefsAction::SetBufferLink(!buffer.linked));
+                        action = Some(PrefsAction::SetPlayoutMode(if immediate {
+                            PlayoutMode::Synced
+                        } else {
+                            PlayoutMode::Immediate
+                        }));
                     }
                     ui.label(
-                        RichText::new(t(language, "monitor.buffer_unlink_info"))
+                        RichText::new(t(language, "monitor.playout_immediate_info"))
                             .small()
                             .color(chrome.text_muted),
                     );
                     ui.add_space(6.0);
+                    ui.add_enabled_ui(!immediate, |ui| {
+                        if toggle_row(
+                            ui,
+                            chrome,
+                            t(language, "monitor.buffer_link"),
+                            buffer.linked,
+                        ) {
+                            action = Some(PrefsAction::SetBufferLink(!buffer.linked));
+                        }
+                        ui.label(
+                            RichText::new(t(language, "monitor.buffer_unlink_info"))
+                                .small()
+                                .color(chrome.text_muted),
+                        );
+                        ui.add_space(6.0);
 
-                    buffer_frames_field(
-                        ui,
-                        chrome,
-                        language,
-                        t(language, "monitor.buffer_video"),
-                        &mut buffer_edit.video_frames,
-                        video_delay_ms,
-                        fps_n,
-                        fps_d,
-                        &mut action,
-                    );
-                    ui.add_space(4.0);
-                    buffer_ms_field(
-                        ui,
-                        chrome,
-                        t(language, "monitor.buffer_audio"),
-                        &mut buffer_edit.audio_ms,
-                        if buffer.linked {
-                            video_delay_ms
-                        } else {
-                            audio_delay_ms
-                        },
-                        &mut action,
-                    );
+                        buffer_frames_field(
+                            ui,
+                            chrome,
+                            language,
+                            t(language, "monitor.buffer_video"),
+                            &mut buffer_edit.video_frames,
+                            video_delay_ms,
+                            fps_n,
+                            fps_d,
+                            &mut action,
+                        );
+                        ui.add_space(4.0);
+                        buffer_ms_field(
+                            ui,
+                            chrome,
+                            t(language, "monitor.buffer_audio"),
+                            &mut buffer_edit.audio_ms,
+                            if buffer.linked {
+                                video_delay_ms
+                            } else {
+                                audio_delay_ms
+                            },
+                            &mut action,
+                        );
+                    });
 
                     // —— Window / help ——
                     ui.add_space(12.0);

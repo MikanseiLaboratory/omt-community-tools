@@ -189,6 +189,7 @@ impl MonitorApp {
         worker.set_gpu(gpu);
         let mut settings = MonitorSettings::default();
         settings.video_decode = settings::decode_path_from_config(layout.video_decode);
+        settings.buffer.mode = settings::playout_mode_from_config(layout.playout_mode);
         worker.set_buffer(settings.buffer);
         worker.set_audio_boost_db(settings.audio_boost_db);
         worker.set_audio_volume_pct(settings.audio_volume_pct);
@@ -958,6 +959,11 @@ impl MonitorApp {
                     fps_d,
                 );
             }
+            PrefsAction::SetPlayoutMode(mode) => {
+                self.settings.buffer.mode = mode;
+                self.worker.set_buffer(self.settings.buffer);
+                self.persist_monitor_layout();
+            }
             PrefsAction::SetBufferLink(linked) => {
                 self.set_buffer_link(linked);
                 let (fps_n, fps_d) = self.buffer_fps();
@@ -1033,6 +1039,7 @@ impl MonitorApp {
             stats_audio_open: self.stats_audio_open,
             stats_source_open: self.stats_source_open,
             video_decode: settings::decode_path_to_config(self.settings.video_decode),
+            playout_mode: settings::playout_mode_to_config(self.settings.buffer.mode),
         };
         let _ = save_studio_monitor_config(&cfg);
     }

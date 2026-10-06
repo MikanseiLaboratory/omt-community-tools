@@ -20,7 +20,7 @@ pub use discovery::{
     DiscoveredSource, SourceBrowser, discover_sources, spawn_discover, uniquify_local_source_name,
     uniquify_source_name,
 };
-pub use playout::{BufferSettings, BufferUnit, DelaySetting};
+pub use playout::{BufferSettings, BufferUnit, DelaySetting, PlayoutMode};
 pub use receive::{
     ConnectOptions, LatestVideo, MetadataLogEntry, ReceiveCounters, ReceiveWorker, VideoDecodePath,
     VideoFrame,

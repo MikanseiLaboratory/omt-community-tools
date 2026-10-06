@@ -72,3 +72,17 @@ pub fn decode_path_to_config(path: omt_media::VideoDecodePath) -> suite_core::Vi
         omt_media::VideoDecodePath::Gpu => suite_core::VideoDecodePath::Gpu,
     }
 }
+
+pub fn playout_mode_from_config(mode: suite_core::PlayoutMode) -> omt_media::PlayoutMode {
+    match mode {
+        suite_core::PlayoutMode::Synced => omt_media::PlayoutMode::Synced,
+        suite_core::PlayoutMode::Immediate => omt_media::PlayoutMode::Immediate,
+    }
+}
+
+pub fn playout_mode_to_config(mode: omt_media::PlayoutMode) -> suite_core::PlayoutMode {
+    match mode {
+        omt_media::PlayoutMode::Synced => suite_core::PlayoutMode::Synced,
+        omt_media::PlayoutMode::Immediate => suite_core::PlayoutMode::Immediate,
+    }
+}
