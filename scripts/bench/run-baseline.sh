@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build release tools and run reproducible VMX baselines.
-# Usage (from omt-tools root):
+# Usage (from omt-community-tools root):
 #   ./scripts/bench/run-baseline.sh
 #   NATIVE=1 ./scripts/bench/run-baseline.sh
 #   ./scripts/bench/run-baseline.sh 1920 1080 20
@@ -33,7 +33,7 @@ echo "==> Building vmx simd_report ($TAG)"
   cargo run --release --example simd_report -- "$WIDTH" "$HEIGHT" "$ITERS" | tee "$ROOT/$OUT_FILE"
 )
 
-echo "==> Building omt-tools monitor-bench ($TAG)"
+echo "==> Building omt-community-tools monitor-bench ($TAG)"
 cargo build --release -p monitor-bench -p omt-test-patterns | tee -a "$OUT_FILE"
 
 echo "Results written to $OUT_FILE"

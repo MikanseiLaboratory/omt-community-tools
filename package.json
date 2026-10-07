@@ -1,7 +1,7 @@
 {
-  "name": "omt-tools",
+  "name": "omt-community-tools",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.1.4",
   "packageManager": "bun@1.2.19",
   "scripts": {
     "dev": "bun run --cwd apps/launcher dev",

@@ -1,9 +1,9 @@
-# OMT Tools
+# OMT Community Tools
 
-[![CI](https://github.com/MikanseiLaboratory/omt-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-tools/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-tools/releases/latest)
+[![CI](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-community-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-community-tools/releases/latest)
 
-Open Media Transport production utilities inspired by NDI Tools.
+Open Media Transport production utilities made by [MikanseiLaboratory](https://github.com/MikanseiLaboratory).
 
 <img width="907" height="703" alt="image" src="https://github.com/user-attachments/assets/e3900c36-cf5b-47fe-8dc0-174d53682840" />
 
@@ -20,9 +20,6 @@ Open Media Transport production utilities inspired by NDI Tools.
 
 Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Settings Manager): [vMix Desktop Capture](https://www.vmix.com/software/vmix-desktop-capture.aspx)
 
-Runtime media stack: [`MikanseiLaboratory/openmediatransport-rs`](https://github.com/MikanseiLaboratory/openmediatransport-rs) + [`MikanseiLaboratory/vmx-rs`](https://github.com/MikanseiLaboratory/vmx-rs)
-(VMX SIMD path reporting via `simd_path()`: `avx2` / `sse128` / `neon` / `scalar`).
-
 ## Prerequisites
 
 - Rust **1.97+** (edition 2024)
@@ -34,9 +31,11 @@ Runtime media stack: [`MikanseiLaboratory/openmediatransport-rs`](https://github
 - Windows Arm64 (`aarch64-pc-windows-msvc`)
 - macOS Intel (`x86_64-apple-darwin`)
 - macOS Apple Silicon (`aarch64-apple-darwin`)
-- Linux x64 (`x86_64-unknown-linux-gnu`)
-- Linux Arm64 (`aarch64-unknown-linux-gnu`)
+- [WIP] Linux x64 (`x86_64-unknown-linux-gnu`)
+- [WIP] Linux Arm64 (`aarch64-unknown-linux-gnu`)
 
 ## License
 
-MIT
+[PolyForm Shield 1.0.0](https://polyformproject.org/licenses/shield/1.0.0)
+
+Source-available. You may use, modify, and distribute this software for any purpose except providing a product that competes with this software or with products MikanseiLaboratory provides using it. See [LICENSE](LICENSE) for the full terms.

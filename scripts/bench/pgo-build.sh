@@ -2,7 +2,7 @@
 # Optional PGO build for OMT sidecars / monitor-bench.
 # Does NOT modify Cargo.toml profiles permanently.
 #
-# Usage (from omt-tools root):
+# Usage (from omt-community-tools root):
 #   ./scripts/bench/pgo-build.sh
 # Requires llvm-profdata on PATH.
 

@@ -8,10 +8,12 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use eframe::egui::{self, Context, Pos2, TextureHandle, TextureOptions};
+use eframe::egui::{self, ColorImage, Context, Pos2, TextureHandle, TextureId, TextureOptions};
+use eframe::egui_wgpu::{RenderState, WgpuSetup, wgpu};
 use omt_media::{
     AudioLevels, AudioOutputDevice, AudioOutputStatus, BufferUnit, ConnectOptions, DelaySetting,
-    DiscoveredSource, ReceiveWorker, SessionState, StallState, list_output_devices, spawn_discover,
+    DiscoveredSource, GpuVideoContext, ReceiveWorker, SessionState, StallState, VideoDecodePath,
+    list_output_devices, spawn_discover,
 };
 use suite_core::{
     Language, SUITE_VERSION, SimdCapabilities, StudioMonitorConfig, ThemePreference,
@@ -20,9 +22,9 @@ use suite_core::{
 };
 
 use crate::chrome::UiChrome;
-use crate::frame_prep::{FramePrep, PrepControl, PreparedFrame};
+use crate::frame_prep::{FramePrep, PrepControl};
 use crate::preferences::{self, BufferEditState, PrefsAction};
-use crate::settings::MonitorSettings;
+use crate::settings::{self, MonitorSettings};
 
 type DiscoveryResult = Result<Vec<DiscoveredSource>, String>;
 
@@ -44,6 +46,24 @@ const TOOLBAR_H: f32 = 48.0;
 const ACTION_SAFE_FRAC: f32 = 0.93;
 const TITLE_SAFE_FRAC: f32 = 0.90;
 
+fn wgpu_options_with_bgra_storage() -> eframe::WgpuConfiguration {
+    let mut config = eframe::WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(create) = &mut config.wgpu_setup {
+        let inner = Arc::clone(&create.device_descriptor);
+        create.device_descriptor = Arc::new(move |adapter| {
+            let mut desc = inner(adapter);
+            if adapter
+                .features()
+                .contains(wgpu::Features::BGRA8UNORM_STORAGE)
+            {
+                desc.required_features |= wgpu::Features::BGRA8UNORM_STORAGE;
+            }
+            desc
+        });
+    }
+    config
+}
+
 /// Launch the egui Studio Monitor window.
 pub fn run_eframe(
     title: String,
@@ -56,6 +76,7 @@ pub fn run_eframe(
             .with_inner_size([1440.0, 860.0])
             .with_title(title.clone())
             .with_app_id(suite_core::ToolId::StudioMonitor.binary_name()),
+        wgpu_options: wgpu_options_with_bgra_storage(),
         ..Default::default()
     };
     eframe::run_native(
@@ -63,12 +84,7 @@ pub fn run_eframe(
         options,
         Box::new(move |cc| {
             install_egui_cjk_fonts(&cc.egui_ctx);
-            Ok(Box::new(MonitorApp::new(
-                &cc.egui_ctx,
-                language,
-                theme,
-                initial_url,
-            )))
+            Ok(Box::new(MonitorApp::new(cc, language, theme, initial_url)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
@@ -103,6 +119,9 @@ struct MonitorApp {
     window_fps_count: u32,
     window_fps_start: Instant,
     texture: Option<TextureHandle>,
+    native_video_id: Option<TextureId>,
+    held_gpu_texture: Option<wgpu::Texture>,
+    wgpu_state: Option<RenderState>,
     discovering: bool,
     discovery_rx: Option<Receiver<DiscoveryResult>>,
     refresh_silent: bool,
@@ -125,6 +144,8 @@ struct MonitorApp {
     reconnects: u64,
     wire_queue_depth: u32,
     session_state: SessionState,
+    /// Decode backend reported by the receive worker (`None` while idle).
+    active_video_decode: Option<VideoDecodePath>,
     pan_x: f32,
     pan_y: f32,
     pan_drag: Option<Pos2>,
@@ -134,6 +155,9 @@ struct MonitorApp {
     settings: MonitorSettings,
     buffer_edit: BufferEditState,
     fullscreen: bool,
+    /// eframe skips `ui` while minimized/occluded; ingest still runs in `logic`.
+    window_hidden: bool,
+    last_got_frame: bool,
     last_theme_dark: Option<bool>,
     simd_summary: String,
     sidebar_w: f32,
@@ -142,21 +166,42 @@ struct MonitorApp {
     stats_video_open: bool,
     stats_audio_open: bool,
     stats_source_open: bool,
+    /// Row-padded staging for `queue.write_texture` (256-byte alignment).
+    cpu_upload_pad: Vec<u8>,
 }
 
 impl MonitorApp {
     fn new(
-        ctx: &Context,
+        cc: &eframe::CreationContext<'_>,
         language: Language,
         theme: ThemePreference,
         initial_url: Option<String>,
     ) -> Self {
+        let ctx = &cc.egui_ctx;
+        let layout = load_studio_monitor_config().unwrap_or_default();
+        let wgpu_state = cc.wgpu_render_state.clone();
+        let gpu = wgpu_state.as_ref().map(|state| GpuVideoContext {
+            device: Arc::new(state.device.clone()),
+            queue: Arc::new(state.queue.clone()),
+            gpu_lock: None,
+        });
         let worker = ReceiveWorker::spawn();
-        let settings = MonitorSettings::default();
+        worker.set_gpu(gpu);
+        let mut settings = MonitorSettings::default();
+        settings.video_decode = settings::decode_path_from_config(layout.video_decode);
+        settings.buffer.mode = settings::playout_mode_from_config(layout.playout_mode);
         worker.set_buffer(settings.buffer);
         worker.set_audio_boost_db(settings.audio_boost_db);
+        worker.set_audio_volume_pct(settings.audio_volume_pct);
         if let Some(url) = &initial_url {
-            worker.connect(url.clone());
+            let (quality, preview) = settings.quality.to_connect_parts();
+            worker.connect_with(ConnectOptions {
+                url: url.clone(),
+                addresses: Vec::new(),
+                quality,
+                preview,
+                video_decode: settings.video_decode,
+            });
         }
 
         let prep_ctrl = PrepControl::new();
@@ -169,7 +214,6 @@ impl MonitorApp {
 
         let suite_version = std::env::var(suite_core::env::SUITE_VERSION)
             .unwrap_or_else(|_| SUITE_VERSION.to_string());
-        let layout = load_studio_monitor_config().unwrap_or_default();
 
         let system_dark = matches!(ctx.system_theme(), Some(egui::Theme::Dark));
         let chrome = UiChrome::resolve(theme, system_dark);
@@ -201,6 +245,9 @@ impl MonitorApp {
             window_fps_count: 0,
             window_fps_start: Instant::now(),
             texture: None,
+            native_video_id: None,
+            held_gpu_texture: None,
+            wgpu_state,
             discovering: false,
             discovery_rx: None,
             refresh_silent: true,
@@ -223,6 +270,7 @@ impl MonitorApp {
             reconnects: 0,
             wire_queue_depth: 0,
             session_state: SessionState::Stopped,
+            active_video_decode: None,
             pan_x: 0.0,
             pan_y: 0.0,
             pan_drag: None,
@@ -232,6 +280,8 @@ impl MonitorApp {
             settings,
             buffer_edit: BufferEditState::default(),
             fullscreen: false,
+            window_hidden: false,
+            last_got_frame: false,
             last_theme_dark: None,
             simd_summary: SimdCapabilities::detect().summary(),
             sidebar_w: clamp_sidebar_w(layout.sidebar_w as f32),
@@ -240,6 +290,7 @@ impl MonitorApp {
             stats_video_open: layout.stats_video_open,
             stats_audio_open: layout.stats_audio_open,
             stats_source_open: layout.stats_source_open,
+            cpu_upload_pad: Vec::new(),
         };
         app.buffer_edit.sync_from(
             app.settings.buffer,
@@ -315,8 +366,10 @@ impl MonitorApp {
                 entry.kind,
                 entry.text
             );
-            self.log_lines.clear();
             self.log_lines.push_back(line);
+            while self.log_lines.len() > 128 {
+                self.log_lines.pop_front();
+            }
         }
     }
 
@@ -324,26 +377,28 @@ impl MonitorApp {
         let Some(frame) = self.prep_ctrl.take_prepared() else {
             return false;
         };
-        let frame = Arc::try_unwrap(frame).unwrap_or_else(|arc| PreparedFrame {
-            image: arc.image.clone(),
-            fps_n: arc.fps_n,
-            fps_d: arc.fps_d,
-        });
-        self.frame_w = frame.image.width() as u32;
-        self.frame_h = frame.image.height() as u32;
+        self.frame_w = frame.width;
+        self.frame_h = frame.height;
         self.fps_n = frame.fps_n;
         self.fps_d = frame.fps_d.max(1);
         self.window_fps_count += 1;
         self.last_frame_at = Some(Instant::now());
 
-        let size = frame.image.size;
-        match &mut self.texture {
-            Some(tex) if tex.size() == size => {
-                tex.set(frame.image, TextureOptions::LINEAR);
-            }
-            _ => {
-                self.texture =
-                    Some(ctx.load_texture("omt-video", frame.image, TextureOptions::LINEAR));
+        if self.upload_cpu_pixels_native(&frame.pixels, frame.width, frame.height, frame.rgba) {
+            self.texture = None;
+        } else {
+            self.clear_native_video();
+            let image =
+                color_image_from_pixels(&frame.pixels, frame.width, frame.height, frame.rgba);
+            let size = image.size;
+            match &mut self.texture {
+                Some(tex) if tex.size() == size => {
+                    tex.set(image, TextureOptions::LINEAR);
+                }
+                _ => {
+                    self.texture =
+                        Some(ctx.load_texture("omt-video", image, TextureOptions::LINEAR));
+                }
             }
         }
         self.frames_presented = self
@@ -357,13 +412,214 @@ impl MonitorApp {
         true
     }
 
-    fn on_tick(&mut self, ctx: &Context) -> bool {
+    fn upload_cpu_pixels_native(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        rgba: bool,
+    ) -> bool {
+        let Some(state) = self.wgpu_state.clone() else {
+            return false;
+        };
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let expected = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        if pixels.len() < expected {
+            return false;
+        }
+        let format = if rgba {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Bgra8Unorm
+        };
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let recreate = match self.held_gpu_texture.as_ref() {
+            Some(tex) => {
+                tex.size().width != width || tex.size().height != height || tex.format() != format
+            }
+            None => true,
+        };
+        if recreate {
+            self.held_gpu_texture = Some(state.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("omt-cpu-video"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }));
+        }
+        let src_row = width.saturating_mul(4);
+        let padded_row = padded_bytes_per_row(width);
+        let src = &pixels[..expected];
+        let padded = padded_row != src_row;
+        if padded {
+            let padded_len = padded_row as usize * height as usize;
+            if self.cpu_upload_pad.len() != padded_len {
+                self.cpu_upload_pad.resize(padded_len, 0);
+            }
+            for y in 0..height as usize {
+                let src_off = y * src_row as usize;
+                let dst_off = y * padded_row as usize;
+                self.cpu_upload_pad[dst_off..dst_off + src_row as usize]
+                    .copy_from_slice(&src[src_off..src_off + src_row as usize]);
+            }
+        }
+        let view = {
+            let Some(tex) = self.held_gpu_texture.as_ref() else {
+                return false;
+            };
+            let data: &[u8] = if padded { &self.cpu_upload_pad } else { src };
+            state.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(if padded { padded_row } else { src_row }),
+                    rows_per_image: Some(height),
+                },
+                size,
+            );
+            tex.create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let mut renderer = state.renderer.write();
+        if recreate {
+            if let Some(id) = self.native_video_id.take() {
+                renderer.free_texture(&id);
+            }
+            self.native_video_id = Some(renderer.register_native_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+            ));
+        } else if let Some(id) = self.native_video_id {
+            renderer.update_egui_texture_from_wgpu_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            );
+        } else {
+            self.native_video_id = Some(renderer.register_native_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+            ));
+        }
+        true
+    }
+
+    fn ingest_gpu_frame(&mut self) -> bool {
+        let Some(frame) = self.worker.latest().take_gpu() else {
+            return false;
+        };
+        let Some(state) = self.wgpu_state.as_ref() else {
+            return false;
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut renderer = state.renderer.write();
+            match self.native_video_id {
+                Some(id) => renderer.update_egui_texture_from_wgpu_texture(
+                    &state.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                    id,
+                ),
+                None => {
+                    self.native_video_id = Some(renderer.register_native_texture(
+                        &state.device,
+                        &view,
+                        wgpu::FilterMode::Linear,
+                    ));
+                }
+            }
+        }
+        self.held_gpu_texture = Some(frame.texture);
+        self.texture = None;
+        self.frame_w = frame.width;
+        self.frame_h = frame.height;
+        self.fps_n = frame.frame_rate_n;
+        self.fps_d = frame.frame_rate_d.max(1);
+        self.window_fps_count += 1;
+        self.last_frame_at = Some(Instant::now());
+        self.frames_presented = self.frames_presented.saturating_add(1);
+        true
+    }
+
+    fn clear_native_video(&mut self) {
+        if let (Some(state), Some(id)) = (self.wgpu_state.as_ref(), self.native_video_id.take()) {
+            state.renderer.write().free_texture(&id);
+        }
+        self.held_gpu_texture = None;
+    }
+
+    fn rebind_held_gpu_texture(&mut self) {
+        let Some(tex) = self.held_gpu_texture.as_ref() else {
+            return;
+        };
+        let Some(state) = self.wgpu_state.as_ref() else {
+            return;
+        };
+        let Some(id) = self.native_video_id else {
+            return;
+        };
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        state
+            .renderer
+            .write()
+            .update_egui_texture_from_wgpu_texture(
+                &state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            );
+    }
+
+    pub(crate) fn has_video(&self) -> bool {
+        (self.native_video_id.is_some() || self.texture.is_some())
+            && self.frame_w > 0
+            && self.frame_h > 0
+    }
+
+    pub(crate) fn video_texture_id(&self) -> Option<TextureId> {
+        self.native_video_id
+            .or_else(|| self.texture.as_ref().map(|tex| tex.id()))
+    }
+
+    fn on_tick(&mut self, ctx: &Context, ingest_gpu: bool) -> bool {
         self.poll_discovery();
         if !self.discovering && self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.request_refresh(true);
         }
         self.ingest_logs();
-        let got_frame = self.ingest_prepared_frame(ctx);
+        let mut got_frame = false;
+        if ingest_gpu {
+            got_frame = self.ingest_gpu_frame();
+            if got_frame {
+                self.prep_ctrl.slot.store(None);
+            }
+        }
+        if !got_frame {
+            got_frame = self.ingest_prepared_frame(ctx);
+        }
 
         {
             let counters = *self.worker.latest().counters.lock();
@@ -372,6 +628,7 @@ impl MonitorApp {
             let audio_buffer_delay_ms = *self.worker.latest().audio_buffer_delay_ms.lock();
             let stats = *self.worker.latest().stats.lock();
             let session_state = *self.worker.latest().session_state.lock();
+            let video_decode = *self.worker.latest().video_decode.lock();
 
             self.frames_decoded = counters.frames_decoded;
             self.source_dropped = counters.frames_replaced;
@@ -380,6 +637,7 @@ impl MonitorApp {
             self.video_buffer_delay_ms = video_buffer_delay_ms;
             self.audio_buffer_delay_ms = audio_buffer_delay_ms;
             self.session_state = session_state;
+            self.active_video_decode = video_decode;
             if self.settings.buffer.linked {
                 let (fps_n, fps_d) = self.buffer_fps();
                 let before = self.settings.buffer;
@@ -412,15 +670,15 @@ impl MonitorApp {
                 self.status = "Connecting…".into();
             }
             SessionState::Reconnecting => {
-                self.status = format!("Reconnecting… ({})", self.reconnects);
+                self.status = match self.worker.latest().error.lock().clone() {
+                    Some(err) if !err.is_empty() => {
+                        format!("Reconnecting… ({}) — {err}", self.reconnects)
+                    }
+                    _ => format!("Reconnecting… ({})", self.reconnects),
+                };
             }
             SessionState::Connected => {
-                if let Some(err) = self.worker.latest().error.lock().clone() {
-                    if !err.is_empty() {
-                        self.status = err;
-                    }
-                } else if self.status.starts_with("Connecting")
-                    || self.status.starts_with("Reconnecting")
+                if self.status.starts_with("Connecting") || self.status.starts_with("Reconnecting")
                 {
                     self.status.clear();
                 }
@@ -470,6 +728,7 @@ impl MonitorApp {
             addresses,
             quality,
             preview,
+            video_decode: self.settings.video_decode,
         });
     }
 
@@ -483,6 +742,7 @@ impl MonitorApp {
         self.frame_w = 0;
         self.frame_h = 0;
         self.texture = None;
+        self.clear_native_video();
         self.status = t(self.language, "monitor.none").to_string();
     }
 
@@ -506,11 +766,13 @@ impl MonitorApp {
         self.reconnects = 0;
         self.wire_queue_depth = 0;
         self.session_state = SessionState::Connecting;
+        self.active_video_decode = None;
         self.zoom = 1.0;
         self.pan_x = 0.0;
         self.pan_y = 0.0;
         self.pan_drag = None;
         self.texture = None;
+        self.clear_native_video();
         self.status.clear();
     }
 
@@ -523,6 +785,12 @@ impl MonitorApp {
     fn set_audio_boost_db(&mut self, db: i32) {
         self.settings.audio_boost_db = db;
         self.worker.set_audio_boost_db(db);
+    }
+
+    fn set_audio_volume_pct(&mut self, pct: i32) {
+        self.settings.audio_volume_pct = pct.clamp(0, 100);
+        self.worker
+            .set_audio_volume_pct(self.settings.audio_volume_pct);
     }
 
     fn set_video_delay(&mut self, delay: DelaySetting) {
@@ -691,6 +959,11 @@ impl MonitorApp {
                     fps_d,
                 );
             }
+            PrefsAction::SetPlayoutMode(mode) => {
+                self.settings.buffer.mode = mode;
+                self.worker.set_buffer(self.settings.buffer);
+                self.persist_monitor_layout();
+            }
             PrefsAction::SetBufferLink(linked) => {
                 self.set_buffer_link(linked);
                 let (fps_n, fps_d) = self.buffer_fps();
@@ -705,9 +978,17 @@ impl MonitorApp {
                 );
             }
             PrefsAction::SetBoost(db) => self.set_audio_boost_db(db),
+            PrefsAction::SetVolume(pct) => self.set_audio_volume_pct(pct),
             PrefsAction::SetQuality(preset) => {
                 self.settings.quality = preset;
                 self.reapply_connection();
+            }
+            PrefsAction::SetVideoDecode(path) => {
+                if self.settings.video_decode != path {
+                    self.settings.video_decode = path;
+                    self.persist_monitor_layout();
+                    self.reapply_connection();
+                }
             }
             PrefsAction::SetAlpha(v) => {
                 self.settings.show_alpha = v;
@@ -718,12 +999,12 @@ impl MonitorApp {
             PrefsAction::EnterFullscreen => self.enter_fullscreen(ctx),
             PrefsAction::OpenHelp => {
                 ctx.open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/MikanseiLaboratory/omt-tools#readme",
+                    "https://github.com/MikanseiLaboratory/omt-community-tools#readme",
                 ));
             }
             PrefsAction::OpenLicense => {
                 ctx.open_url(egui::OpenUrl::new_tab(
-                    "https://github.com/MikanseiLaboratory/omt-tools/blob/main/LICENSE",
+                    "https://github.com/MikanseiLaboratory/omt-community-tools/blob/main/LICENSE",
                 ));
             }
             PrefsAction::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -757,16 +1038,36 @@ impl MonitorApp {
             stats_video_open: self.stats_video_open,
             stats_audio_open: self.stats_audio_open,
             stats_source_open: self.stats_source_open,
+            video_decode: settings::decode_path_to_config(self.settings.video_decode),
+            playout_mode: settings::playout_mode_to_config(self.settings.buffer.mode),
         };
         let _ = save_studio_monitor_config(&cfg);
     }
 }
 
 impl eframe::App for MonitorApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // While the window is occluded, eframe skips `ui` / present and only
+        // calls this. Video ingest used to live in `ui`, so the picture froze
+        // until the window was shown again (audio kept playing on its thread).
+        self.apply_theme_if_needed(ctx);
+        let hidden = ctx.input(|i| i.viewport().visible() == Some(false));
+        let became_visible = self.window_hidden && !hidden;
+        self.window_hidden = hidden;
+        // Pause wgpu copies in the receive worker while occluded. The previous
+        // 16ms hidden repaint still submitted GPU work with no present, which
+        // wedged the shared device and made the OMT sockets flap (Reconnects).
+        self.worker.set_gpu_ingest(!hidden);
+        if became_visible {
+            self.rebind_held_gpu_texture();
+            ctx.request_repaint();
+        }
+        self.last_got_frame = self.on_tick(ctx, !hidden);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.apply_theme_if_needed(&ctx);
-        let got_frame = self.on_tick(&ctx);
+        let got_frame = self.last_got_frame;
 
         // Escape / F11 fullscreen handling
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -804,6 +1105,7 @@ impl eframe::App for MonitorApp {
                 &self.audio_devices,
                 self.audio_output_device.as_deref(),
                 self.audio_unavailable(),
+                self.worker.gpu_available(),
                 self.settings.buffer,
                 self.video_buffer_delay_ms,
                 self.audio_buffer_delay_ms,
@@ -815,17 +1117,41 @@ impl eframe::App for MonitorApp {
             self.apply_prefs_action(action, &ctx);
         }
 
-        // Repaint when a prepared frame arrives (prep thread also requests).
-        // VU meters only need ~30 Hz — continuous full-rate paints starve the GPU path.
-        if got_frame || self.preferences_open {
+        // New video already wakes the event loop from the prep thread.
+        // A 16 ms connected timer was tessellating the full CJK chrome at
+        // 60 Hz even when the picture did not change, which starved other apps.
+        if got_frame {
             ctx.request_repaint();
-        } else if connected && self.settings.vu_meter {
-            ctx.request_repaint_after(Duration::from_millis(33));
-        } else if connected || self.fullscreen {
-            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.preferences_open || connected || self.fullscreen {
+            ctx.request_repaint_after(Duration::from_millis(50));
         } else {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+fn padded_bytes_per_row(width: u32) -> u32 {
+    let row = width.saturating_mul(4);
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    row.div_ceil(align) * align
+}
+
+fn color_image_from_pixels(pixels: &[u8], width: u32, height: u32, rgba: bool) -> ColorImage {
+    let expected = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    let src = if pixels.len() >= expected {
+        &pixels[..expected]
+    } else {
+        pixels
+    };
+    let size = [width as usize, height as usize];
+    if rgba {
+        ColorImage::from_rgba_premultiplied(size, src)
+    } else {
+        let mut rgba_buf = vec![0u8; expected];
+        omt_media::bgra_to_rgba_into(src, &mut rgba_buf);
+        ColorImage::from_rgba_premultiplied(size, &rgba_buf)
     }
 }
 

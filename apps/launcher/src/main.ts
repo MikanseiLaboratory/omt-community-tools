@@ -4,7 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
-const DOCS_URL = "https://github.com/MikanseiLaboratory/omt-tools#readme";
+const DOCS_URL = "https://github.com/MikanseiLaboratory/omt-community-tools#readme";
 
 type ToolCard = {
   id: string;

@@ -1,7 +1,7 @@
 //! Windowed / fullscreen chrome panels and layout splitters.
 
 use eframe::egui::{self, Color32, Context, CursorIcon, Pos2, Rect, RichText, Sense, Ui, Vec2};
-use omt_media::{AudioLevels, BufferUnit, DiscoveredSource};
+use omt_media::{AudioLevels, BufferUnit, DiscoveredSource, PlayoutMode};
 use suite_core::{Language, t};
 
 use super::{
@@ -9,6 +9,11 @@ use super::{
     TITLE_SAFE_FRAC, TOOLBAR_H, clamp_log_h, clamp_sidebar_w, clamp_stats_w,
 };
 use crate::chrome::UiChrome;
+
+/// Fixed row height so the log ScrollArea only shapes on-screen lines.
+const LOG_ROW_H: f32 = 16.0;
+/// Cap CJK shaping cost for long per-frame metadata XML.
+const LOG_LINE_CHARS: usize = 240;
 
 impl MonitorApp {
     pub(crate) fn ui_fullscreen(&mut self, ui: &mut egui::Ui, ctx: &Context, chrome: UiChrome) {
@@ -24,7 +29,7 @@ impl MonitorApp {
                     self.exit_fullscreen(ctx);
                 }
 
-                let has_frame = self.texture.is_some() && self.frame_w > 0 && self.frame_h > 0;
+                let has_frame = self.has_video();
                 if has_frame {
                     let (dw, dh) = self.fit_display_in_viewport(full.width(), full.height());
                     let video_rect = Rect::from_center_size(full.center(), Vec2::new(dw, dh));
@@ -164,7 +169,7 @@ impl MonitorApp {
             self.pan_drag = None;
         }
 
-        let has_frame = self.texture.is_some() && self.frame_w > 0 && self.frame_h > 0;
+        let has_frame = self.has_video();
         if has_frame {
             let (dw, dh) = self.display_size();
             let origin = content.min + Vec2::new(self.pan_x, self.pan_y);
@@ -330,7 +335,7 @@ impl MonitorApp {
     }
 
     fn paint_video_stack(&mut self, ui: &mut Ui, _chrome: UiChrome, video_rect: Rect, clip: Rect) {
-        let Some(tex) = &self.texture else {
+        let Some(tex_id) = self.video_texture_id() else {
             return;
         };
         if self.frame_w == 0 || self.frame_h == 0 {
@@ -338,7 +343,7 @@ impl MonitorApp {
         }
         let painter = ui.painter().with_clip_rect(clip);
         painter.image(
-            tex.id(),
+            tex_id,
             video_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
@@ -422,6 +427,22 @@ impl MonitorApp {
                                     "{:.2} (peak {:.2})",
                                     self.decode_ms_avg, self.decode_ms_peak
                                 ),
+                            );
+                            stat_row(
+                                ui,
+                                chrome,
+                                t(self.language, "monitor.decode"),
+                                match self
+                                    .active_video_decode
+                                    .unwrap_or(self.settings.video_decode)
+                                {
+                                    omt_media::VideoDecodePath::Cpu => {
+                                        t(self.language, "monitor.decode_cpu").to_string()
+                                    }
+                                    omt_media::VideoDecodePath::Gpu => {
+                                        t(self.language, "monitor.decode_gpu").to_string()
+                                    }
+                                },
                             );
                             stat_row(
                                 ui,
@@ -551,7 +572,7 @@ impl MonitorApp {
                 egui::ScrollArea::vertical()
                     .id_salt("monitor_log")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show_rows(ui, LOG_ROW_H, self.log_lines.len().max(1), |ui, rows| {
                         ui.set_min_width(ui.available_width());
                         if self.log_lines.is_empty() {
                             ui.label(
@@ -560,10 +581,17 @@ impl MonitorApp {
                                     .italics()
                                     .small(),
                             );
-                        } else {
-                            for line in &self.log_lines {
-                                ui.monospace(RichText::new(line).color(chrome.text_muted).small());
-                            }
+                            return;
+                        }
+                        for i in rows {
+                            let Some(line) = self.log_lines.get(i) else {
+                                continue;
+                            };
+                            ui.monospace(
+                                RichText::new(truncate_log_line(line))
+                                    .color(chrome.text_muted)
+                                    .small(),
+                            );
                         }
                     });
             });
@@ -830,6 +858,13 @@ fn peak_to_meter(peak: f32) -> f32 {
     ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
 }
 
+fn truncate_log_line(line: &str) -> &str {
+    match line.char_indices().nth(LOG_LINE_CHARS) {
+        Some((idx, _)) => &line[..idx],
+        None => line,
+    }
+}
+
 fn format_dbfs(peak: f32) -> String {
     if peak <= 1e-6 {
         "-∞ dBFS".into()
@@ -891,6 +926,9 @@ fn format_buffer_stats(
     fps_n: i32,
     fps_d: i32,
 ) -> String {
+    if buffer.mode == PlayoutMode::Immediate {
+        return t(language, "monitor.playout_immediate").to_string();
+    }
     let v = format_video_delay_frames(language, buffer, video_ms, fps_n, fps_d);
     let a = format!("{audio_ms} ms");
     if buffer.linked {

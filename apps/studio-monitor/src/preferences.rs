@@ -1,7 +1,7 @@
 //! Preferences modal — language, theme, viewer, audio, A/V buffer, version, license.
 
 use egui::{Color32, Context, RichText, Sense, Ui, Vec2};
-use omt_media::{AudioOutputDevice, BufferSettings};
+use omt_media::{AudioOutputDevice, BufferSettings, PlayoutMode};
 use suite_core::{Language, SUITE_VERSION, ThemePreference, t};
 
 use crate::chrome::UiChrome;
@@ -56,8 +56,11 @@ pub enum PrefsAction {
     SetVideoDelayFrames(u32),
     SetAudioDelayMs(u32),
     SetBufferLink(bool),
+    SetPlayoutMode(PlayoutMode),
     SetBoost(i32),
+    SetVolume(i32),
     SetQuality(VideoQualityPreset),
+    SetVideoDecode(omt_media::VideoDecodePath),
     SetAlpha(bool),
     SetSafeArea(bool),
     SetVu(bool),
@@ -79,6 +82,7 @@ pub fn show(
     audio_devices: &[AudioOutputDevice],
     selected_audio: Option<&str>,
     audio_unavailable: bool,
+    gpu_available: Option<bool>,
     buffer: BufferSettings,
     video_delay_ms: u32,
     audio_delay_ms: u32,
@@ -184,6 +188,42 @@ pub fn show(
                         }
                     });
 
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(t(language, "monitor.decode"))
+                            .small()
+                            .color(chrome.text_muted),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if chip_button(
+                            ui,
+                            chrome,
+                            t(language, "monitor.decode_cpu"),
+                            settings.video_decode == omt_media::VideoDecodePath::Cpu,
+                        ) {
+                            action =
+                                Some(PrefsAction::SetVideoDecode(omt_media::VideoDecodePath::Cpu));
+                        }
+                        if chip_button(
+                            ui,
+                            chrome,
+                            t(language, "monitor.decode_gpu"),
+                            settings.video_decode == omt_media::VideoDecodePath::Gpu,
+                        ) {
+                            action =
+                                Some(PrefsAction::SetVideoDecode(omt_media::VideoDecodePath::Gpu));
+                        }
+                    });
+                    if settings.video_decode == omt_media::VideoDecodePath::Gpu
+                        && gpu_available == Some(false)
+                    {
+                        ui.label(
+                            RichText::new(t(language, "monitor.decode_gpu_unavailable"))
+                                .small()
+                                .color(chrome.text_muted),
+                        );
+                    }
+
                     ui.add_space(12.0);
                     section_title(ui, chrome, t(language, "monitor.overlay"));
                     if toggle_row(
@@ -205,6 +245,23 @@ pub fn show(
 
                     ui.add_space(12.0);
                     section_title(ui, chrome, t(language, "monitor.audio"));
+                    ui.label(
+                        RichText::new(t(language, "monitor.audio_volume"))
+                            .small()
+                            .color(chrome.text_muted),
+                    );
+                    ui.horizontal(|ui| {
+                        let mut volume = settings.audio_volume_pct;
+                        let resp = ui.add(
+                            egui::Slider::new(&mut volume, 0..=100)
+                                .suffix("%")
+                                .show_value(true),
+                        );
+                        if resp.changed() {
+                            action = Some(PrefsAction::SetVolume(volume));
+                        }
+                    });
+                    ui.add_space(8.0);
                     ui.label(
                         RichText::new(t(language, "monitor.audio_boost"))
                             .small()
@@ -279,45 +336,66 @@ pub fn show(
                     ui.add_space(12.0);
                     ui.separator();
                     section_title(ui, chrome, t(language, "monitor.av_buffer"));
+                    let immediate = buffer.mode == PlayoutMode::Immediate;
                     if toggle_row(
                         ui,
                         chrome,
-                        t(language, "monitor.buffer_link"),
-                        buffer.linked,
+                        t(language, "monitor.playout_immediate"),
+                        immediate,
                     ) {
-                        action = Some(PrefsAction::SetBufferLink(!buffer.linked));
+                        action = Some(PrefsAction::SetPlayoutMode(if immediate {
+                            PlayoutMode::Synced
+                        } else {
+                            PlayoutMode::Immediate
+                        }));
                     }
                     ui.label(
-                        RichText::new(t(language, "monitor.buffer_unlink_info"))
+                        RichText::new(t(language, "monitor.playout_immediate_info"))
                             .small()
                             .color(chrome.text_muted),
                     );
                     ui.add_space(6.0);
+                    ui.add_enabled_ui(!immediate, |ui| {
+                        if toggle_row(
+                            ui,
+                            chrome,
+                            t(language, "monitor.buffer_link"),
+                            buffer.linked,
+                        ) {
+                            action = Some(PrefsAction::SetBufferLink(!buffer.linked));
+                        }
+                        ui.label(
+                            RichText::new(t(language, "monitor.buffer_unlink_info"))
+                                .small()
+                                .color(chrome.text_muted),
+                        );
+                        ui.add_space(6.0);
 
-                    buffer_frames_field(
-                        ui,
-                        chrome,
-                        language,
-                        t(language, "monitor.buffer_video"),
-                        &mut buffer_edit.video_frames,
-                        video_delay_ms,
-                        fps_n,
-                        fps_d,
-                        &mut action,
-                    );
-                    ui.add_space(4.0);
-                    buffer_ms_field(
-                        ui,
-                        chrome,
-                        t(language, "monitor.buffer_audio"),
-                        &mut buffer_edit.audio_ms,
-                        if buffer.linked {
-                            video_delay_ms
-                        } else {
-                            audio_delay_ms
-                        },
-                        &mut action,
-                    );
+                        buffer_frames_field(
+                            ui,
+                            chrome,
+                            language,
+                            t(language, "monitor.buffer_video"),
+                            &mut buffer_edit.video_frames,
+                            video_delay_ms,
+                            fps_n,
+                            fps_d,
+                            &mut action,
+                        );
+                        ui.add_space(4.0);
+                        buffer_ms_field(
+                            ui,
+                            chrome,
+                            t(language, "monitor.buffer_audio"),
+                            &mut buffer_edit.audio_ms,
+                            if buffer.linked {
+                                video_delay_ms
+                            } else {
+                                audio_delay_ms
+                            },
+                            &mut action,
+                        );
+                    });
 
                     // —— Window / help ——
                     ui.add_space(12.0);

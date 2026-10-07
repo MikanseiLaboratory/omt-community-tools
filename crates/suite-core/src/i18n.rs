@@ -195,6 +195,8 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "monitor.exit") => "終了",
         (Language::English, "monitor.audio_boost") => "Boost",
         (Language::Japanese, "monitor.audio_boost") => "ブースト",
+        (Language::English, "monitor.audio_volume") => "Volume",
+        (Language::Japanese, "monitor.audio_volume") => "音量",
         (Language::English, "monitor.audio_output") => "Audio output",
         (Language::Japanese, "monitor.audio_output") => "音声出力先",
         (Language::English, "monitor.audio_default") => "System default",
@@ -210,6 +212,14 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         }
         (Language::Japanese, "monitor.audio_unavailable_hint") => {
             "映像は再生を続けます。設定から別の出力デバイスを選んでください。"
+        }
+        (Language::English, "monitor.playout_immediate") => "Present on arrival",
+        (Language::Japanese, "monitor.playout_immediate") => "受信したまま出す",
+        (Language::English, "monitor.playout_immediate_info") => {
+            "Video and audio are presented as they arrive, without timestamp sync."
+        }
+        (Language::Japanese, "monitor.playout_immediate_info") => {
+            "届いた映像と音声を、タイムスタンプでは揃えずにそのまま出します。"
         }
         (Language::English, "monitor.av_buffer") => "A/V buffer",
         (Language::Japanese, "monitor.av_buffer") => "A/Vバッファ",
@@ -245,19 +255,31 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "monitor.quality_high") => "高",
         (Language::English, "monitor.quality_low_bw") => "Low Bandwidth",
         (Language::Japanese, "monitor.quality_low_bw") => "低帯域",
+        (Language::English, "monitor.decode") => "Decode",
+        (Language::Japanese, "monitor.decode") => "デコード",
+        (Language::English, "monitor.decode_cpu") => "CPU",
+        (Language::Japanese, "monitor.decode_cpu") => "CPU",
+        (Language::English, "monitor.decode_gpu") => "WGPU",
+        (Language::Japanese, "monitor.decode_gpu") => "WGPU",
+        (Language::English, "monitor.decode_gpu_unavailable") => {
+            "eframe wgpu renderer unavailable — CPU decode is used"
+        }
+        (Language::Japanese, "monitor.decode_gpu_unavailable") => {
+            "eframe の wgpu レンダラが無いため CPU デコードを使います"
+        }
         (Language::English, "monitor.safe_area") => "Safe areas",
         (Language::Japanese, "monitor.safe_area") => "セーフエリア",
         (Language::English, "monitor.vu_meter") => "VU meter",
         (Language::Japanese, "monitor.vu_meter") => "VUメーター",
         (Language::English, "monitor.preferences") => "Preferences",
         (Language::Japanese, "monitor.preferences") => "環境設定",
-        (Language::English, "monitor.license_spdx") => "MIT License",
-        (Language::Japanese, "monitor.license_spdx") => "MIT ライセンス",
+        (Language::English, "monitor.license_spdx") => "PolyForm Shield License 1.0.0",
+        (Language::Japanese, "monitor.license_spdx") => "PolyForm Shield ライセンス 1.0.0",
         (Language::English, "monitor.license_body") => {
-            "Copyright (c) MikanseiLaboratory. Permission is hereby granted, free of charge, to use, copy, modify, and distribute this software under the MIT License terms."
+            "Copyright (c) MikanseiLaboratory. You may use, modify, and distribute this software under the PolyForm Shield 1.0.0 terms, except to provide a competing product."
         }
         (Language::Japanese, "monitor.license_body") => {
-            "Copyright (c) MikanseiLaboratory. MIT ライセンスの条件下で、本ソフトウェアの使用・複製・改変・再配布が許可されています。"
+            "Copyright (c) MikanseiLaboratory. PolyForm Shield 1.0.0 の条件下で、本ソフトウェアの使用・改変・再配布が許可されています。競合製品の提供には使えません。"
         }
         (Language::English, "monitor.license_link") => "View full license on GitHub",
         (Language::Japanese, "monitor.license_link") => "GitHubで全文を表示",
