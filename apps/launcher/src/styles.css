@@ -111,15 +111,16 @@ select {
 
 .brand-logo {
   display: block;
-  width: min(220px, 46vw);
-  height: auto;
+  width: auto;
+  height: clamp(40px, 7vw, 68px);
+  max-width: min(640px, 68vw);
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
 }
 
-/* Official Alpha mark on light chrome; Dark mark on dark chrome. */
+/* Light-background wordmark on light chrome; dark-background wordmark on dark chrome. */
 .brand-logo-light {
   display: none;
 }
@@ -595,7 +596,10 @@ select {
 
 @media (max-width: 720px) {
   .brand-logo {
-    width: min(168px, 52vw);
+    width: auto;
+    height: auto;
+    max-height: 44px;
+    max-width: calc(100vw - 240px);
   }
 
   .page {
