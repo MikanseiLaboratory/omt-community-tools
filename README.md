@@ -31,8 +31,8 @@ Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Set
 - Windows Arm64 (`aarch64-pc-windows-msvc`)
 - macOS Intel (`x86_64-apple-darwin`)
 - macOS Apple Silicon (`aarch64-apple-darwin`)
-- [WIP] Linux x64 (`x86_64-unknown-linux-gnu`)
-- [WIP] Linux Arm64 (`aarch64-unknown-linux-gnu`)
+- Linux x64 (`x86_64-unknown-linux-gnu`)
+- Linux Arm64 (`aarch64-unknown-linux-gnu`)
 
 ## Linux notes
 
