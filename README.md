@@ -38,7 +38,7 @@ Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Set
 
 Linux builds ship as `.deb`, `.rpm`, and AppImage.
 
-The `.deb` installs `/usr/bin/omt-launcher` and the tool binaries in `/usr/bin` (`omt-studio-monitor`, `omt-test-patterns`, `omt-config-manager`, `omt-discovery-server`, `omt-discovery-server-gui`), plus a menu entry "OMT Tools". The AppImage bundles its own WebKitGTK and runs with `GDK_BACKEND=x11` (X11/XWayland).
+The `.deb` installs `/usr/bin/omt-launcher` and the tool binaries in `/usr/bin` (`omt-studio-monitor`, `omt-test-patterns`, `omt-config-manager`, `omt-discovery-server`, `omt-discovery-server-gui`), plus a menu entry "OMT Tools". The AppImage bundles its own WebKitGTK and runs with `GDK_BACKEND=x11` (X11/XWayland). The AppImage forces `GDK_BACKEND=x11`, so on Wayland it requires XWayland (verified: on a pure Wayland session without XWayland it fails with "Failed to initialize GTK"); on Wayland desktops such as Raspberry Pi OS (which ship XWayland) it works, and the `.deb` runs natively on Wayland.
 
 ### Runtime requirements
 
