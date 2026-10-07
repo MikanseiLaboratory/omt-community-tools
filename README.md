@@ -1,11 +1,14 @@
 # OMT Community Tools
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/branding/omt-community-tools-logo-on-dark.svg">
+  <img alt="OMT Community Tools" src="assets/branding/omt-community-tools-logo-on-light.svg" width="720">
+</picture>
+
 [![CI](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-community-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-community-tools/releases/latest)
 
-Open Media Transport production utilities made by [MikanseiLaboratory](https://github.com/MikanseiLaboratory).
-
-<img width="907" height="703" alt="image" src="https://github.com/user-attachments/assets/e3900c36-cf5b-47fe-8dc0-174d53682840" />
+Open Media Transport production utilities made by [MikanseiLaboratory](https://github.com/MikanseiLaboratory). This is an independent community project and is not affiliated with StudioCoast Pty Ltd or vMix.
 
 
 
