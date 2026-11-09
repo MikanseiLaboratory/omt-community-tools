@@ -37,6 +37,33 @@ Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Set
 - Linux x64 (`x86_64-unknown-linux-gnu`)
 - Linux Arm64 (`aarch64-unknown-linux-gnu`)
 
+## macOS notes
+
+macOS builds are code signed in CI. Without an Apple Developer certificate the release workflow ad-hoc signs the app (`APPLE_SIGNING_IDENTITY=-`). Ad-hoc signing is required on Apple Silicon: the linker already ad-hoc signs every arm64 Mach-O, so an app bundle that is not itself signed looks like it has a broken signature (`code has no resources but signature indicates they must be present`). Gatekeeper then reports "OMT Tools is damaged and can't be opened" and never starts the process.
+
+Ad-hoc signing still does not notarize the build, so on first launch macOS asks you to allow it. Open **System Settings → Privacy & Security** and click **Open Anyway** (on older macOS versions, Control-click the app and choose **Open**).
+
+When building a macOS release locally, use `bun run build:macos`. It builds the sidecars, stages them, and signs the app; set `TAURI_TARGET=x86_64-apple-darwin` for an Intel build. A plain `bun run tauri build` leaves the `.app` unsigned and reproduces the Gatekeeper failure above.
+
+To ship a build that opens without that prompt, add these repository secrets; Tauri then signs with the Developer ID certificate and notarizes automatically:
+
+- `APPLE_CERTIFICATE` — base64-encoded Developer ID Application `.p12`
+- `APPLE_CERTIFICATE_PASSWORD` — password for the `.p12`
+- `APPLE_SIGNING_IDENTITY` — certificate name from `security find-identity -v -p codesigning`
+- `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID` — notarization credentials
+
+Releases published before this was configured (v0.1.5 and earlier) contain no bundle signature. If you trust the download and macOS says the app is damaged, remove the quarantine flag once and open it normally:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/OMT Tools.app"
+```
+
+For a step-by-step walkthrough with screenshots of both dialogs, see [docs/macos-gatekeeper.md](docs/macos-gatekeeper.md).
+
+## Windows notes
+
+The `.msi` and `-setup.exe` installers are not Authenticode-signed yet, so SmartScreen may warn that the publisher is unknown. Choose **More info → Run anyway**. Signing requires a Windows code-signing certificate.
+
 ## Linux notes
 
 Linux builds ship as `.deb`, `.rpm`, and AppImage.

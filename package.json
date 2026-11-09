@@ -1,11 +1,12 @@
 {
   "name": "omt-community-tools",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "packageManager": "bun@1.2.19",
   "scripts": {
     "dev": "bun run --cwd apps/launcher dev",
     "build": "bun run --cwd apps/launcher build",
+    "build:macos": "bash scripts/build-macos.sh",
     "tauri": "bun run --cwd apps/launcher tauri",
     "tools:build": "cargo build -p omt-studio-monitor -p omt-test-patterns -p omt-config-manager -p omt-discovery-server",
     "tools:sidecars:dev": "bun scripts/prepare-dev-sidecars.js",
