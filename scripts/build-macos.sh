@@ -21,6 +21,15 @@ cd "$ROOT"
 
 TARGET="${TAURI_TARGET:-$(rustc -vV | awk '/^host:/{print $2}')}"
 
+# An empty APPLE_CERTIFICATE still looks present to Tauri's var_os check and
+# makes it try to import an empty .p12. Treat empty variables as unset.
+if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
+  unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD
+elif [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+  echo "error: APPLE_CERTIFICATE is set but APPLE_CERTIFICATE_PASSWORD is empty." >&2
+  exit 1
+fi
+
 if [[ -z "${APPLE_SIGNING_IDENTITY:-}" && -z "${APPLE_CERTIFICATE:-}" ]]; then
   export APPLE_SIGNING_IDENTITY="-"
 fi
