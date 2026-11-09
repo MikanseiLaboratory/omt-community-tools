@@ -97,6 +97,21 @@ jobs:
           echo "BASE_VERSION=$BASE_VERSION" >> $GITHUB_ENV
           echo "PRERELEASE_NUMBER=$PRERELEASE_NUMBER" >> $GITHUB_ENV
 
+      # Without a signing identity Tauri skips codesign entirely. On arm64 the
+      # Mach-Os are still linker-signed, which makes the unsigned .app look
+      # like a broken bundle to Gatekeeper ("OMT Tools is damaged").
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_SECRET: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash ./scripts/ci/configure-macos-signing.sh
+
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v1
         env:
@@ -147,3 +162,8 @@ jobs:
           prerelease: true
           uploadUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # Fails the job if signing was skipped or produced a linker-only bundle.
+      - name: Verify macOS code signature
+        if: runner.os == 'macOS'
+        run: bash ./scripts/ci/verify-macos-bundle.sh
