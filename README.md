@@ -43,6 +43,8 @@ macOS builds are code signed in CI. Without an Apple Developer certificate the r
 
 Ad-hoc signing still does not notarize the build, so on first launch macOS asks you to allow it. Open **System Settings → Privacy & Security** and click **Open Anyway** (on older macOS versions, Control-click the app and choose **Open**).
 
+When building a macOS release locally, use `bun run build:macos`. It builds the sidecars, stages them, and signs the app; set `TAURI_TARGET=x86_64-apple-darwin` for an Intel build. A plain `bun run tauri build` leaves the `.app` unsigned and reproduces the Gatekeeper failure above.
+
 To ship a build that opens without that prompt, add these repository secrets; Tauri then signs with the Developer ID certificate and notarizes automatically:
 
 - `APPLE_CERTIFICATE` — base64-encoded Developer ID Application `.p12`
@@ -57,6 +59,10 @@ xattr -dr com.apple.quarantine "/Applications/OMT Tools.app"
 ```
 
 For a step-by-step walkthrough with screenshots of both dialogs, see [docs/macos-gatekeeper.md](docs/macos-gatekeeper.md).
+
+## Windows notes
+
+The `.msi` and `-setup.exe` installers are not Authenticode-signed yet, so SmartScreen may warn that the publisher is unknown. Choose **More info → Run anyway**. Signing requires a Windows code-signing certificate.
 
 ## Linux notes
 

@@ -133,3 +133,12 @@ jobs:
       - name: Verify macOS code signature
         if: runner.os == 'macOS'
         run: bash ./scripts/ci/verify-macos-bundle.sh
+
+      - name: Verify macOS DMG
+        if: runner.os == 'macOS'
+        run: bash ./scripts/ci/verify-macos-dmg.sh
+
+      # The updater archive is built from the signed app; check it too.
+      - name: Verify macOS updater archive
+        if: runner.os == 'macOS'
+        run: bash ./scripts/ci/verify-macos-updater.sh

@@ -5,12 +5,19 @@ param(
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Out = Join-Path $Root "apps\launcher\src-tauri\binaries"
+$HostTriple = (rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
 $TargetDir = Join-Path $Root "target\$Target\release"
 $HostDir = Join-Path $Root "target\release"
+
+# Only fall back to target\release for a host build without --target. For a
+# cross build, target\release contains host binaries and using them would put
+# the wrong architecture inside the bundle (the app starts, sidecars do not).
 if (Test-Path $TargetDir) {
     $ProfileDir = $TargetDir
-} else {
+} elseif ($Target -eq $HostTriple -and (Test-Path $HostDir)) {
     $ProfileDir = $HostDir
+} else {
+    throw "missing $TargetDir - build with cargo build --release --target $Target first"
 }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 

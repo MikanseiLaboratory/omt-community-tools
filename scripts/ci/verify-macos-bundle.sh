@@ -43,6 +43,27 @@ if [[ ! -f "$app/Contents/_CodeSignature/CodeResources" ]]; then
   exit 1
 fi
 
+# A valid signature is not enough: a cross build can bundle sidecars from the
+# host architecture. The launcher then starts, but every tool fails to exec.
+main_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist" 2>/dev/null || echo omt-launcher)"
+main_binary="$app/Contents/MacOS/$main_name"
+if [[ -x "$main_binary" ]]; then
+  main_archs="$(lipo -archs "$main_binary" 2>/dev/null || true)"
+  if [[ -n "$main_archs" ]]; then
+    for binary in "$app/Contents/MacOS/"*; do
+      [[ -f "$binary" ]] || continue
+      binary_archs="$(lipo -archs "$binary" 2>/dev/null || true)"
+      [[ -n "$binary_archs" ]] || continue
+      for arch in $main_archs; do
+        if [[ " $binary_archs " != *" $arch "* ]]; then
+          echo "error: $(basename "$binary") is $binary_archs but the launcher is $main_archs." >&2
+          exit 1
+        fi
+      done
+    done
+  fi
+fi
+
 codesign -dv --verbose=4 "$app" 2>&1 \
   | grep -E '^(Identifier|Format|CodeDirectory|Signature|TeamIdentifier|Sealed Resources)' \
   || true
