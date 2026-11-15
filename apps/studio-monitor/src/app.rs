@@ -97,6 +97,7 @@ struct MonitorApp {
     preferences_open: bool,
     audio_devices: Vec<AudioOutputDevice>,
     audio_output_device: Option<String>,
+    audio_active_device: Option<String>,
     worker: ReceiveWorker,
     /// Owns the prep thread; kept for Drop shutdown.
     #[allow(dead_code)]
@@ -226,6 +227,7 @@ impl MonitorApp {
             preferences_open: false,
             audio_devices: list_output_devices(),
             audio_output_device: None,
+            audio_active_device: None,
             worker,
             prep,
             prep_ctrl,
@@ -898,6 +900,7 @@ impl MonitorApp {
         self.preferences_open = true;
         self.audio_devices = list_output_devices();
         self.audio_output_device = self.worker.audio_output_device();
+        self.audio_active_device = self.worker.audio().active_device_name();
         self.buffer_edit.sync_from(
             self.settings.buffer,
             self.video_buffer_delay_ms,
@@ -1104,6 +1107,7 @@ impl eframe::App for MonitorApp {
                 &self.settings,
                 &self.audio_devices,
                 self.audio_output_device.as_deref(),
+                self.audio_active_device.as_deref(),
                 self.audio_unavailable(),
                 self.worker.gpu_available(),
                 self.settings.buffer,

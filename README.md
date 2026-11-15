@@ -23,6 +23,18 @@ Open Media Transport production utilities made by [MikanseiLaboratory](https://g
 
 Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Settings Manager): [vMix Desktop Capture](https://www.vmix.com/software/vmix-desktop-capture.aspx)
 
+### Test Patterns source names
+
+Test Patterns advertises the exact source name you enter. It never renames a source automatically, because receivers (vMix, Studio Monitor, …) reconnect by the advertised name: silently moving `Test Pattern (2)` between processes makes a receiver show the wrong feed.
+
+If another **live** source on the same machine already uses the name, Test Patterns refuses to start and asks you to choose another one. To run multiple instances on one machine, give each instance its own name:
+
+```bash
+omt-test-patterns --name "Test Pattern 2"
+```
+
+`--name` applies to that process only and is not written back to the shared `test-patterns.json`.
+
 ## Prerequisites
 
 - Rust **1.97+** (edition 2024)

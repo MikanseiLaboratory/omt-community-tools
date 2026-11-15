@@ -1,6 +1,7 @@
 //! Discovery browser wrapper.
 
 use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
 use openmediatransport::{Discovery, OmtError};
@@ -104,15 +105,57 @@ pub fn discover_sources(
     })
 }
 
-/// Browse the LAN and return `desired` or `desired (2)` / `(3)` when this
-/// machine already advertises that source name.
-pub fn uniquify_local_source_name(desired: &str) -> String {
+/// Browse the LAN and return a live source on this machine that still owns
+/// `desired`, if any.
+///
+/// Test Patterns uses this to refuse to start under a name that another live
+/// sender already advertises. Stale DNS-SD entries are ignored by probing the
+/// advertised TCP port.
+pub fn find_local_name_collision(desired: &str) -> Option<DiscoveredSource> {
+    let desired = desired.trim();
+    if desired.is_empty() {
+        return None;
+    }
     let sources = runtime::handle()
         .block_on(discover_sources(UNIQUIFY_BROWSE))
         .ok()
         .and_then(Result::ok)
         .unwrap_or_default();
-    uniquify_source_name(desired, taken_source_names_on_this_host(&sources))
+    local_name_collision(desired, &sources, source_is_live)
+}
+
+/// Pure collision check used by [`find_local_name_collision`] and tests.
+pub fn local_name_collision(
+    desired: &str,
+    sources: &[DiscoveredSource],
+    is_live: impl Fn(&DiscoveredSource) -> bool,
+) -> Option<DiscoveredSource> {
+    sources
+        .iter()
+        .find(|src| is_this_machine(&src.host) && src.source == desired && is_live(src))
+        .cloned()
+}
+
+/// Whether the advertised sender still accepts TCP connections.
+fn source_is_live(source: &DiscoveredSource) -> bool {
+    if source.port == 0 {
+        return false;
+    }
+    let mut hosts: Vec<&str> = vec!["127.0.0.1"];
+    for address in &source.addresses {
+        if !hosts.contains(&address.as_str()) {
+            hosts.push(address);
+        }
+    }
+    hosts.iter().any(|host| {
+        host.parse::<IpAddr>().is_ok_and(|ip| {
+            TcpStream::connect_timeout(
+                &SocketAddr::new(ip, source.port),
+                Duration::from_millis(120),
+            )
+            .is_ok()
+        })
+    })
 }
 
 /// Next free source name on this host (`Name`, then `Name (2)`, `Name (3)`, …).
@@ -138,14 +181,6 @@ pub fn uniquify_source_name(
         }
     }
     clip_source_name(&format!("{stem} ({})", std::process::id()))
-}
-
-fn taken_source_names_on_this_host(sources: &[DiscoveredSource]) -> Vec<String> {
-    sources
-        .iter()
-        .filter(|src| is_this_machine(&src.host))
-        .map(|src| src.source.clone())
-        .collect()
 }
 
 fn is_this_machine(host: &str) -> bool {
@@ -215,7 +250,38 @@ pub fn spawn_discover(
 
 #[cfg(test)]
 mod tests {
-    use super::{name_collision_stem, split_host_source, uniquify_source_name};
+    use super::{
+        DiscoveredSource, local_name_collision, name_collision_stem, split_host_source,
+        uniquify_source_name,
+    };
+
+    fn source(host: &str, name: &str, port: u16) -> DiscoveredSource {
+        DiscoveredSource {
+            name: format!("{host} ({name})"),
+            host: host.into(),
+            source: name.into(),
+            url: format!("omt://{host}:{port}/{name}"),
+            port,
+            addresses: vec!["127.0.0.1".into()],
+        }
+    }
+
+    #[test]
+    fn collision_only_matches_live_local_sources() {
+        let sources = vec![
+            source("LOCALHOST", "Test Pattern", 6401),
+            source("REMOTE", "Test Pattern", 6402),
+        ];
+        let live_local = |src: &DiscoveredSource| src.host == "LOCALHOST";
+        assert_eq!(
+            local_name_collision("Test Pattern", &sources, live_local)
+                .expect("local collision")
+                .port,
+            6401
+        );
+        assert!(local_name_collision("Test Pattern 2", &sources, live_local).is_none());
+        assert!(local_name_collision("Test Pattern", &sources, |_| false).is_none());
+    }
 
     #[test]
     fn splits_combined_name() {

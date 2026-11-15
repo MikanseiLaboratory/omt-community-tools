@@ -17,6 +17,13 @@ struct Args {
     /// Theme (`light` / `dark` / `system`).
     #[arg(long)]
     theme: Option<String>,
+    /// Instance-local OMT source name.
+    ///
+    /// Useful when running more than one Test Patterns on the same machine:
+    /// the name is used for this process only and is not written back to the
+    /// shared `test-patterns.json`.
+    #[arg(long = "name", value_name = "SOURCE_NAME")]
+    name: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,5 +37,5 @@ fn main() -> anyhow::Result<()> {
     );
 
     let title = t(overrides.language, "tool.test_patterns").to_string();
-    ui::run_gpui(title, overrides.language)
+    ui::run_gpui(title, overrides.language, args.name)
 }

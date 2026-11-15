@@ -15,7 +15,8 @@ use gpui::{
 };
 use omt_media::{
     AudioToneConfig, MAX_VIDEO_FRAME_BUFFER_FRAMES, MIN_VIDEO_FRAME_BUFFER_FRAMES, SendSession,
-    SendSessionConfig, SendStats, clamp_video_frame_buffer_frames, uniquify_local_source_name,
+    SendSessionConfig, SendStats, clamp_video_frame_buffer_frames, find_local_name_collision,
+    uniquify_source_name,
 };
 use openmediatransport::{Quality, uyvy_to_rgba};
 use parking_lot::Mutex;
@@ -78,7 +79,11 @@ fn persist_test_patterns_prefs(view: &PatternsView) {
             .map(|img| img.path.clone())
             .collect(),
         frame_buffer_frames: clamp_video_frame_buffer_frames(view.frame_buffer_frames) as u32,
-        name: view.name.clone(),
+        name: if view.name_from_cli {
+            view.shared_config_name.clone()
+        } else {
+            view.name.clone()
+        },
         width: view.width,
         height: view.height,
         fps_n: view.frame_rate.n,
@@ -96,7 +101,7 @@ fn persist_test_patterns_prefs(view: &PatternsView) {
     let _ = save_test_patterns_config(&cfg.sanitized());
 }
 
-pub fn run_gpui(title: String, language: Language) -> Result<()> {
+pub fn run_gpui(title: String, language: Language, initial_name: Option<String>) -> Result<()> {
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(780.0)), cx);
         let title = SharedString::from(title);
@@ -110,7 +115,7 @@ pub fn run_gpui(title: String, language: Language) -> Result<()> {
                 app_id: Some(suite_core::ToolId::TestPatterns.binary_name().into()),
                 ..Default::default()
             },
-            move |_, cx| cx.new(|cx| PatternsView::new(cx, language)),
+            move |_, cx| cx.new(|cx| PatternsView::new(cx, language, initial_name.clone())),
         )
         .expect("open GPUI Test Patterns window");
         cx.activate(true);
@@ -121,8 +126,11 @@ pub fn run_gpui(title: String, language: Language) -> Result<()> {
 struct PatternsView {
     language: Language,
     name: String,
-    /// Advertised name for the current send (`Name (2)` when the host already has `Name`).
-    on_air_name: Option<String>,
+    /// Set when `--name` supplied an instance-local name. Name edits are then
+    /// not written back to the shared `test-patterns.json`.
+    name_from_cli: bool,
+    /// Name currently stored in the shared config (used while `name_from_cli`).
+    shared_config_name: String,
     kind: PatternKind,
     width: i32,
     height: i32,
@@ -168,7 +176,7 @@ struct PatternsView {
 }
 
 impl PatternsView {
-    fn new(cx: &mut Context<Self>, language: Language) -> Self {
+    fn new(cx: &mut Context<Self>, language: Language, initial_name: Option<String>) -> Self {
         let thumbs = PatternKind::builtins()
             .iter()
             .copied()
@@ -176,6 +184,12 @@ impl PatternsView {
             .collect();
 
         let saved_cfg = load_test_patterns_config().unwrap_or_default().sanitized();
+        let cli_name = initial_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        let name_from_cli = cli_name.is_some();
+        let shared_config_name = saved_cfg.name.clone();
+        let name = cli_name.unwrap_or_else(|| saved_cfg.name.clone());
         let frame_buffer_frames =
             clamp_video_frame_buffer_frames(saved_cfg.frame_buffer_frames) as u32;
         let saved = saved_cfg.custom_images.clone();
@@ -194,8 +208,9 @@ impl PatternsView {
 
         let mut view = Self {
             language,
-            name: saved_cfg.name.clone(),
-            on_air_name: None,
+            name,
+            name_from_cli,
+            shared_config_name,
             kind: PatternKind::SmpteColorBars,
             width: saved_cfg.width,
             height: saved_cfg.height,
@@ -800,6 +815,21 @@ impl PatternsView {
     fn restart_session(&mut self) {
         self.stop();
         self.error = None;
+        self.name = self.name.trim().to_string();
+        if self.name.is_empty() {
+            self.name = "Test Pattern".into();
+        }
+        if let Some(collision) = find_local_name_collision(&self.name) {
+            let suggestion = uniquify_source_name(&self.name, [collision.source.as_str()]);
+            self.error = Some(SharedString::from(format!(
+                "{} {} {}",
+                t(self.language, "patterns.name_in_use"),
+                t(self.language, "patterns.name_suggestion"),
+                suggestion
+            )));
+            self.stats_open = true;
+            return;
+        }
         {
             let mut live = self.live.lock();
             live.phase_x = 0.0;
@@ -843,11 +873,8 @@ impl PatternsView {
             buf
         });
 
-        let advertised = uniquify_local_source_name(&self.name);
-        self.on_air_name = Some(advertised.clone());
-
         let config = SendSessionConfig {
-            name: advertised,
+            name: self.name.clone(),
             width: self.width,
             height: self.height,
             fps_n: self.frame_rate.n,
@@ -861,8 +888,8 @@ impl PatternsView {
         match SendSession::start(config, provider) {
             Ok(session) => self.session = Some(session),
             Err(e) => {
-                self.on_air_name = None;
                 self.error = Some(SharedString::from(e.to_string()));
+                self.stats_open = true;
             }
         }
     }
@@ -871,7 +898,6 @@ impl PatternsView {
         if let Some(mut session) = self.session.take() {
             session.stop();
         }
-        self.on_air_name = None;
     }
 
     fn refresh_preview(&mut self, cx: &mut Context<Self>) {
@@ -948,10 +974,7 @@ impl Render for PatternsView {
         let error = self.error.clone();
         let sending = self.session.is_some();
         let title = self.window_title.clone();
-        let name = self
-            .on_air_name
-            .clone()
-            .unwrap_or_else(|| self.name.clone());
+        let name = self.name.clone();
         let name_editing = self.name_editing;
         let width = self.width;
         let height = self.height;

@@ -6112,7 +6112,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "vmx",
  "wgpu",
 ]
 
@@ -6207,8 +6206,9 @@ dependencies = [
 
 [[package]]
 name = "openmediatransport"
-version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/openmediatransport-rs?rev=7711da45e2ed83330c2e1fced06c5d1673e4d502#7711da45e2ed83330c2e1fced06c5d1673e4d502"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e4dc9ba18b9ed02fcd03d7a97804a30e1326f2fc77c75fb7e27d018ad62b60"
 dependencies = [
  "bytes",
  "mdns-sd",
@@ -9968,8 +9968,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmx"
-version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/vmx-rs?rev=b9a0fd19226e3e2ebf4041a2b119b855e71d9ca3#b9a0fd19226e3e2ebf4041a2b119b855e71d9ca3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ceb9c52a194e6510ee4285dc358773a5e9e53bdda9deabb34e9afb3e60df331c"
 dependencies = [
  "bytemuck",
  "pollster 0.4.0",

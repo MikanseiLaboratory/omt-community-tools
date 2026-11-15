@@ -8,8 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openmediatransport::{
-    Codec, ColorSpace, Discovery, FrameType, MediaFrame, NETWORK_ASYNC_COUNT, NETWORK_SEND_BUFFER,
-    NETWORK_SEND_RECEIVE_BUFFER, OmtError, Quality, Sender, SenderConfig, SenderInfo,
+    AudioIngress, Codec, ColorSpace, Discovery, FrameType, MediaFrame, NETWORK_ASYNC_COUNT,
+    NETWORK_SEND_BUFFER, NETWORK_SEND_RECEIVE_BUFFER, OmtError, Quality, Sender, SenderConfig,
+    SenderInfo,
 };
 use parking_lot::Mutex;
 
@@ -26,6 +27,13 @@ pub const MIN_VIDEO_FRAME_BUFFER_FRAMES: u32 = 1;
 pub const MAX_VIDEO_FRAME_BUFFER_FRAMES: u32 = 16;
 /// Max sleep slice while waiting for a frame deadline (keeps stop responsive).
 const PACE_SLEEP_SLICE: Duration = Duration::from_millis(5);
+/// Audio sleeps in short slices so `stop()` stays responsive.
+const AUDIO_SLEEP_SLICE: Duration = Duration::from_millis(5);
+/// If audio pacing falls this far behind, re-anchor the timeline to the wall clock.
+///
+/// Smaller scheduling jitter is absorbed by sending the next packet immediately
+/// with a contiguous PTS, so receivers never see a gap in the tone.
+const AUDIO_RESYNC_LATE: Duration = Duration::from_millis(200);
 
 /// Clamp a configured frame-buffer depth into the supported range.
 pub fn clamp_video_frame_buffer_frames(frames: u32) -> usize {
@@ -123,9 +131,24 @@ pub struct SendStats {
     pub audio_subscribers: u32,
     /// Cumulative bytes sent.
     pub bytes_sent: i64,
+    /// Audio packets handed to the OMT sender.
+    pub audio_frames: i64,
+    /// Longest wall-clock gap between audio packets (milliseconds).
+    pub audio_max_gap_ms: f32,
+    /// Audio timeline resynchronisations caused by a long stall.
+    pub audio_skips: i64,
 }
 
 type FrameProvider = Arc<dyn Fn(u64) -> Vec<u8> + Send + Sync>;
+
+/// Shared, lock-free counters between the audio and video sender threads.
+#[derive(Clone, Default)]
+struct AudioTelemetry {
+    active: Arc<AtomicBool>,
+    frames: Arc<AtomicU64>,
+    max_gap_ms: Arc<AtomicU32>,
+    skips: Arc<AtomicU64>,
+}
 
 /// Background OMT sender owning OS video + audio pacing threads.
 pub struct SendSession {
@@ -192,13 +215,24 @@ impl SendSession {
             config.frame_buffer_frames,
         ) as u32));
         let epoch = Instant::now();
+        let telemetry = AudioTelemetry::default();
+        // Audio owns its own ingress so it never waits for the video encode lock.
+        let audio_ingress = sender.lock().audio_ingress();
 
         let audio_running = Arc::clone(&running);
-        let audio_sender = Arc::clone(&sender);
         let audio_cfg = Arc::clone(&audio);
+        let audio_telemetry = telemetry.clone();
         let audio_join = thread::Builder::new()
             .name("omt-send-audio".into())
-            .spawn(move || audio_loop(audio_sender, audio_cfg, audio_running, epoch))?;
+            .spawn(move || {
+                audio_loop(
+                    audio_ingress,
+                    audio_cfg,
+                    audio_telemetry,
+                    audio_running,
+                    epoch,
+                )
+            })?;
 
         let video_running = Arc::clone(&running);
         let video_sender = Arc::clone(&sender);
@@ -208,6 +242,7 @@ impl SendSession {
         let video_fps_n = Arc::clone(&fps_n);
         let video_fps_d = Arc::clone(&fps_d);
         let video_buffer = Arc::clone(&frame_buffer_frames);
+        let video_telemetry = telemetry.clone();
         let video_cfg = config.clone();
         let video_join = thread::Builder::new()
             .name("omt-send-video".into())
@@ -223,6 +258,7 @@ impl SendSession {
                     video_buffer,
                     video_running,
                     video_stats,
+                    video_telemetry,
                     epoch,
                 );
             })?;
@@ -315,35 +351,119 @@ impl Drop for SendSession {
     }
 }
 
+/// Paces a continuous audio timeline against the shared wall-clock epoch.
+///
+/// Kept separate from the thread loop so the timing rules (contiguous PTS on
+/// small jitter, wall-clock re-anchor on a long stall) are unit-testable.
+struct AudioPacer {
+    samples: i64,
+    rate: i64,
+    next_samples: i64,
+    started: bool,
+}
+
+impl AudioPacer {
+    fn new() -> Self {
+        Self {
+            samples: 1,
+            rate: 1,
+            next_samples: 0,
+            started: false,
+        }
+    }
+
+    /// Update geometry. A sample-rate / packet-size change re-anchors the clock.
+    fn configure(&mut self, samples: i64, rate: i64, elapsed: Duration) {
+        let samples = samples.max(1);
+        let rate = rate.max(1);
+        if !self.started || self.samples != samples || self.rate != rate {
+            self.samples = samples;
+            self.rate = rate;
+            self.started = true;
+            self.resync(elapsed);
+        }
+    }
+
+    /// Align the next packet to the current wall clock.
+    fn resync(&mut self, elapsed: Duration) {
+        let raw = (elapsed.as_secs_f64() * self.rate.max(1) as f64).round() as i64;
+        let samples = self.samples.max(1);
+        self.next_samples = raw - raw.rem_euclid(samples);
+    }
+
+    /// Wall-clock deadline for the next packet.
+    fn due(&self) -> Duration {
+        Duration::from_secs_f64(self.next_samples.max(0) as f64 / self.rate.max(1) as f64)
+    }
+
+    /// PTS for the next packet, without advancing.
+    fn timestamp(&self) -> i64 {
+        self.next_samples
+            .saturating_mul(TICKS_PER_SECOND)
+            .saturating_div(self.rate.max(1))
+    }
+
+    /// Return the next PTS and advance the timeline.
+    fn advance(&mut self) -> i64 {
+        let timestamp = self.timestamp();
+        self.next_samples = self.next_samples.saturating_add(self.samples.max(1));
+        timestamp
+    }
+}
+
 fn audio_loop(
-    sender: Arc<Mutex<Sender>>,
+    ingress: AudioIngress,
     cfg: Arc<Mutex<AudioToneConfig>>,
+    telemetry: AudioTelemetry,
     running: Arc<AtomicBool>,
     epoch: Instant,
 ) {
     let mut audio_buf = Vec::new();
     let mut phase = 0.0f64;
-    let mut samples_sent = 0i64;
+    let mut pacer = AudioPacer::new();
+    let mut active = false;
+    let mut last_sent: Option<Instant> = None;
 
     while running.load(Ordering::Relaxed) {
-        let want = sender.lock().audio_subscribed();
-        if !want {
+        if !telemetry.active.load(Ordering::Acquire) {
+            active = false;
+            last_sent = None;
             thread::sleep(Duration::from_millis(10));
             continue;
         }
+
         let snap = cfg.lock().clone();
         let samples = snap.samples.max(1) as i64;
         let rate = snap.sample_rate.max(1) as i64;
-        let due = Duration::from_secs_f64(samples_sent as f64 / rate as f64);
         let now = epoch.elapsed();
-        if due > now {
-            thread::sleep(due - now);
-        } else if now > due + Duration::from_millis(50) {
-            // Snap to the shared wall epoch (same basis as video_loop) so A/V PTS
-            // stay on one timeline after a catch-up.
-            samples_sent = (now.as_secs_f64() * rate as f64).round() as i64;
-            samples_sent -= samples_sent % samples;
+
+        if active {
+            pacer.configure(samples, rate, now);
+        } else {
+            // A new receiver starts on the current wall clock, not on a stale
+            // packet backlog from before the subscription.
+            pacer.configure(samples, rate, now);
+            pacer.resync(now);
+            active = true;
+            last_sent = None;
         }
+
+        let due = pacer.due();
+        if due > now {
+            thread::sleep((due - now).min(AUDIO_SLEEP_SLICE));
+            continue;
+        }
+
+        let late = now.saturating_sub(due);
+        if late >= AUDIO_RESYNC_LATE {
+            pacer.resync(now);
+            telemetry.skips.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                late_ms = late.as_millis(),
+                "audio send fell behind; re-anchored to wall clock"
+            );
+        }
+
         audio_buf.clear();
         if snap.tone_hz > 0.0 {
             append_sine_planar(
@@ -361,8 +481,7 @@ fn audio_loop(
             let n = samples.max(0) as usize;
             audio_buf.resize(ch * n * 4, 0);
         }
-        let timestamp = samples_sent.saturating_mul(TICKS_PER_SECOND) / rate;
-        samples_sent += samples;
+        let timestamp = pacer.advance();
         let frame = MediaFrame {
             frame_type: FrameType::AUDIO,
             timestamp,
@@ -374,7 +493,16 @@ fn audio_loop(
             data: std::mem::take(&mut audio_buf),
             ..Default::default()
         };
-        let _ = sender.lock().send_audio(frame);
+        if ingress.send(frame).is_ok() {
+            telemetry.frames.fetch_add(1, Ordering::Relaxed);
+            let sent_at = Instant::now();
+            if let Some(previous) = last_sent {
+                let gap_ms = sent_at.duration_since(previous).as_secs_f32() * 1000.0;
+                let gap_ms = gap_ms.round().clamp(0.0, u32::MAX as f32) as u32;
+                telemetry.max_gap_ms.fetch_max(gap_ms, Ordering::Relaxed);
+            }
+            last_sent = Some(sent_at);
+        }
     }
 }
 
@@ -493,6 +621,7 @@ fn video_loop(
     frame_buffer_frames: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
     stats: Arc<Mutex<SendStats>>,
+    audio_telemetry: AudioTelemetry,
     epoch: Instant,
 ) {
     let stride = (cfg.width as usize) * 2;
@@ -532,12 +661,15 @@ fn video_loop(
         }
         let buffer_depth =
             clamp_video_frame_buffer_frames(frame_buffer_frames.load(Ordering::Relaxed));
-        let video_ok = {
+        let (video_ok, audio_ok) = {
             let mut s = sender.lock();
             let _ = s.poll_accept();
             let _ = s.poll_peer_metadata();
-            s.video_subscribed()
+            (s.video_subscribed(), s.audio_subscribed())
         };
+        // The audio thread reads this atomic and never takes the sender lock, so
+        // a long VMX encode cannot stall the tone.
+        audio_telemetry.active.store(audio_ok, Ordering::Release);
         if !video_ok {
             if was_subscribed {
                 buffer.clear();
@@ -668,6 +800,9 @@ fn video_loop(
             snap.video_subscribers = video_subs;
             snap.audio_subscribers = audio_subs;
             snap.bytes_sent = st.bytes_sent;
+            snap.audio_frames = audio_telemetry.frames.load(Ordering::Relaxed) as i64;
+            snap.audio_max_gap_ms = audio_telemetry.max_gap_ms.load(Ordering::Relaxed) as f32;
+            snap.audio_skips = audio_telemetry.skips.load(Ordering::Relaxed) as i64;
             last_codec_time = st.codec_time;
             last_frames = st.frames;
             last_stats = Instant::now();
@@ -841,5 +976,60 @@ mod tests {
         let (idx, pixels) = buffer.pop_front().expect("ready frame");
         assert_eq!(idx, 40);
         assert_eq!(pixels, vec![1, 2]);
+    }
+
+    #[test]
+    fn audio_pacer_keeps_contiguous_pts() {
+        let mut pacer = AudioPacer::new();
+        pacer.configure(480, 48_000, Duration::ZERO);
+        assert_eq!(pacer.due(), Duration::ZERO);
+        assert_eq!(pacer.advance(), 0);
+        assert_eq!(pacer.due(), Duration::from_millis(10));
+        assert_eq!(pacer.timestamp(), 100_000);
+        assert_eq!(pacer.advance(), 100_000);
+        assert_eq!(pacer.timestamp(), 200_000);
+
+        // Slightly late packets catch up without changing the PTS cadence.
+        pacer.configure(480, 48_000, Duration::from_millis(21));
+        assert_eq!(pacer.due(), Duration::from_millis(20));
+        assert_eq!(pacer.advance(), 200_000);
+    }
+
+    #[test]
+    fn audio_pacer_resyncs_after_long_stall() {
+        let mut pacer = AudioPacer::new();
+        pacer.configure(480, 48_000, Duration::ZERO);
+        pacer.resync(Duration::from_millis(250));
+        assert_eq!(pacer.due(), Duration::from_millis(250));
+        assert_eq!(pacer.timestamp(), 2_500_000);
+
+        // 25 ms is rounded down to the previous 10 ms packet boundary.
+        pacer.resync(Duration::from_millis(25));
+        assert_eq!(pacer.due(), Duration::from_millis(20));
+        assert_eq!(pacer.timestamp(), 200_000);
+    }
+
+    #[test]
+    fn audio_pacer_reconfigures_on_sample_rate_change() {
+        let mut pacer = AudioPacer::new();
+        pacer.configure(480, 48_000, Duration::ZERO);
+        pacer.advance();
+        pacer.configure(441, 44_100, Duration::from_millis(10));
+        assert_eq!(pacer.due(), Duration::from_millis(10));
+        assert_eq!(pacer.timestamp(), 100_000);
+        pacer.advance();
+        assert_eq!(pacer.timestamp(), 200_000);
+    }
+
+    #[test]
+    fn audio_pacer_timestamps_stay_monotonic() {
+        let mut pacer = AudioPacer::new();
+        pacer.configure(480, 48_000, Duration::ZERO);
+        let mut previous = -1;
+        for _ in 0..10_000 {
+            let timestamp = pacer.advance();
+            assert!(timestamp > previous, "timestamp went backwards");
+            previous = timestamp;
+        }
     }
 }
