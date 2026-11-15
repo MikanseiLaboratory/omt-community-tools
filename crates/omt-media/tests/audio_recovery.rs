@@ -45,6 +45,10 @@ impl Proxy {
                             let _ = client.shutdown(Shutdown::Both);
                             continue;
                         };
+                        // A nonblocking listener can hand out nonblocking sockets
+                        // on Windows; io::copy would then spin and close at once.
+                        let _ = client.set_nonblocking(false);
+                        let _ = upstream.set_nonblocking(false);
                         if let Ok(tracked) = client.try_clone() {
                             clients_thread.lock().unwrap().push(tracked);
                         }
