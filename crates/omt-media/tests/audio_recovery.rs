@@ -121,6 +121,10 @@ fn wait_for_audio(worker: &ReceiveWorker, minimum: u64, timeout: Duration) -> Op
     None
 }
 
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "loopback proxy is unreliable on Windows CI; covered on macOS/Linux"
+)]
 #[test]
 fn audio_resumes_after_a_brief_outage() {
     let width = 320i32;
