@@ -309,8 +309,6 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "patterns.name_in_use") => {
             "このマシンで同名のソースが既に動作しています。停止するか別の名前にしてください。"
         }
-        (Language::English, "patterns.name_suggestion") => "Suggested name:",
-        (Language::Japanese, "patterns.name_suggestion") => "候補:",
         (Language::English, "patterns.pattern") => "Pattern",
         (Language::Japanese, "patterns.pattern") => "パターン",
         (Language::English, "patterns.animate") => "Animate",
@@ -557,7 +555,6 @@ mod tests {
             "patterns.start",
             "patterns.restart_required",
             "patterns.name_in_use",
-            "patterns.name_suggestion",
             "config.path",
             "config.port_range",
             "config.xml_preview",

@@ -1,6 +1,5 @@
 //! Discovery browser wrapper.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -8,8 +7,8 @@ use openmediatransport::{Discovery, OmtError};
 
 use crate::runtime;
 
-/// Brief browse used to avoid colliding with another local sender.
-const UNIQUIFY_BROWSE: Duration = Duration::from_millis(500);
+/// Brief browse used to detect a colliding local sender.
+const COLLISION_BROWSE: Duration = Duration::from_millis(500);
 
 /// A discovered OMT source suitable for UI lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,16 +107,15 @@ pub fn discover_sources(
 /// Browse the LAN and return a live source on this machine that still owns
 /// `desired`, if any.
 ///
-/// Test Patterns uses this to refuse to start under a name that another live
-/// sender already advertises. Stale DNS-SD entries are ignored by probing the
-/// advertised TCP port.
+/// Test Patterns refuses to start when this returns a source. Stale DNS-SD
+/// entries are ignored by probing the advertised TCP port.
 pub fn find_local_name_collision(desired: &str) -> Option<DiscoveredSource> {
     let desired = desired.trim();
     if desired.is_empty() {
         return None;
     }
     let sources = runtime::handle()
-        .block_on(discover_sources(UNIQUIFY_BROWSE))
+        .block_on(discover_sources(COLLISION_BROWSE))
         .ok()
         .and_then(Result::ok)
         .unwrap_or_default();
@@ -158,31 +156,6 @@ fn source_is_live(source: &DiscoveredSource) -> bool {
     })
 }
 
-/// Next free source name on this host (`Name`, then `Name (2)`, `Name (3)`, …).
-pub fn uniquify_source_name(
-    desired: &str,
-    taken: impl IntoIterator<Item = impl AsRef<str>>,
-) -> String {
-    let desired = desired.trim();
-    let desired = if desired.is_empty() {
-        "Test Pattern"
-    } else {
-        desired
-    };
-    let taken: HashSet<String> = taken.into_iter().map(|s| s.as_ref().to_string()).collect();
-    if !taken.contains(desired) {
-        return clip_source_name(desired);
-    }
-    let stem = name_collision_stem(desired);
-    for n in 2..=99 {
-        let candidate = format!("{stem} ({n})");
-        if !taken.contains(&candidate) {
-            return clip_source_name(&candidate);
-        }
-    }
-    clip_source_name(&format!("{stem} ({})", std::process::id()))
-}
-
 fn is_this_machine(host: &str) -> bool {
     let host = host.trim();
     if host.is_empty() {
@@ -206,32 +179,6 @@ fn this_machine_labels() -> Vec<String> {
     labels
 }
 
-fn name_collision_stem(name: &str) -> &str {
-    if let Some(rest) = name.strip_suffix(')')
-        && let Some(open) = rest.rfind(" (")
-    {
-        let inside = &rest[open + 2..];
-        if !inside.is_empty() && inside.chars().all(|c| c.is_ascii_digit()) {
-            return rest[..open].trim_end();
-        }
-    }
-    if let Some(dash) = name.rfind('-') {
-        let tail = &name[dash + 1..];
-        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
-            return name[..dash].trim_end();
-        }
-    }
-    name
-}
-
-fn clip_source_name(name: &str) -> String {
-    let mut out = name.trim().to_string();
-    while out.len() > 64 {
-        out.pop();
-    }
-    out
-}
-
 /// Spawn discovery and deliver the result on a std mpsc channel (UI-friendly).
 pub fn spawn_discover(
     wait: Duration,
@@ -250,10 +197,7 @@ pub fn spawn_discover(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DiscoveredSource, local_name_collision, name_collision_stem, split_host_source,
-        uniquify_source_name,
-    };
+    use super::{DiscoveredSource, local_name_collision, split_host_source};
 
     fn source(host: &str, name: &str, port: u16) -> DiscoveredSource {
         DiscoveredSource {
@@ -264,6 +208,13 @@ mod tests {
             port,
             addresses: vec!["127.0.0.1".into()],
         }
+    }
+
+    #[test]
+    fn splits_combined_name() {
+        let (h, s) = split_host_source("", "DESKTOP (Cam1)");
+        assert_eq!(h, "DESKTOP");
+        assert_eq!(s, "Cam1");
     }
 
     #[test]
@@ -281,44 +232,5 @@ mod tests {
         );
         assert!(local_name_collision("Test Pattern 2", &sources, live_local).is_none());
         assert!(local_name_collision("Test Pattern", &sources, |_| false).is_none());
-    }
-
-    #[test]
-    fn splits_combined_name() {
-        let (h, s) = split_host_source("", "DESKTOP (Cam1)");
-        assert_eq!(h, "DESKTOP");
-        assert_eq!(s, "Cam1");
-    }
-
-    #[test]
-    fn stem_strips_paren_or_dash_index() {
-        assert_eq!(name_collision_stem("Test Pattern"), "Test Pattern");
-        assert_eq!(name_collision_stem("Test Pattern (2)"), "Test Pattern");
-        assert_eq!(name_collision_stem("Test Pattern-3"), "Test Pattern");
-        assert_eq!(name_collision_stem("Cam (main)"), "Cam (main)");
-    }
-
-    #[test]
-    fn uniquify_appends_paren_index() {
-        assert_eq!(
-            uniquify_source_name("Test Pattern", None::<&str>),
-            "Test Pattern"
-        );
-        assert_eq!(
-            uniquify_source_name("Test Pattern", ["Test Pattern"]),
-            "Test Pattern (2)"
-        );
-        assert_eq!(
-            uniquify_source_name("Test Pattern", ["Test Pattern", "Test Pattern (2)"]),
-            "Test Pattern (3)"
-        );
-        assert_eq!(
-            uniquify_source_name("Test Pattern (2)", ["Test Pattern", "Test Pattern (2)"]),
-            "Test Pattern (3)"
-        );
-        assert_eq!(
-            uniquify_source_name("Test Pattern-2", ["Test Pattern-2"]),
-            "Test Pattern (2)"
-        );
     }
 }

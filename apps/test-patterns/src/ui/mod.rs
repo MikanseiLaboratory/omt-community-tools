@@ -16,7 +16,6 @@ use gpui::{
 use omt_media::{
     AudioToneConfig, MAX_VIDEO_FRAME_BUFFER_FRAMES, MIN_VIDEO_FRAME_BUFFER_FRAMES, SendSession,
     SendSessionConfig, SendStats, clamp_video_frame_buffer_frames, find_local_name_collision,
-    uniquify_source_name,
 };
 use openmediatransport::{Quality, uyvy_to_rgba};
 use parking_lot::Mutex;
@@ -819,14 +818,10 @@ impl PatternsView {
         if self.name.is_empty() {
             self.name = "Test Pattern".into();
         }
-        if let Some(collision) = find_local_name_collision(&self.name) {
-            let suggestion = uniquify_source_name(&self.name, [collision.source.as_str()]);
-            self.error = Some(SharedString::from(format!(
-                "{} {} {}",
-                t(self.language, "patterns.name_in_use"),
-                t(self.language, "patterns.name_suggestion"),
-                suggestion
-            )));
+        if find_local_name_collision(&self.name).is_some() {
+            self.error = Some(SharedString::from(
+                t(self.language, "patterns.name_in_use").to_string(),
+            ));
             self.stats_open = true;
             return;
         }

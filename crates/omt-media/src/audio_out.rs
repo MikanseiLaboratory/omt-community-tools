@@ -108,7 +108,7 @@ struct Shared {
     geometry: Mutex<DeviceGeometry>,
     /// `None` = system default output.
     device_name: Mutex<Option<String>>,
-    /// Device actually opened (may be the default fallback).
+    /// Device actually opened.
     active_device_name: Mutex<Option<String>>,
     /// PTS currently being output (valid when `playhead_valid`).
     playhead_pts: AtomicI64,
@@ -206,8 +206,7 @@ impl AudioOutput {
         self.shared.device_name.lock().clone()
     }
 
-    /// Device that is actually open, which may differ from the selection when
-    /// the selected device is missing or cannot be opened.
+    /// Device that is actually open.
     pub fn active_device_name(&self) -> Option<String> {
         self.shared.active_device_name.lock().clone()
     }
@@ -220,9 +219,8 @@ impl AudioOutput {
     /// Switch output device. `None` selects the system default.
     pub fn set_output_device(&self, name: Option<String>) {
         *self.shared.device_name.lock() = name.clone();
-        // Clone the command sender before touching the ring: the receive worker
-        // can call this while the audio thread is in `request_reopen`, and the
-        // old code took the two locks in opposite orders.
+        // Clone the command sender before touching the ring so this can never
+        // deadlock against `request_reopen` (which takes the ring first).
         let cmd_tx = self.cmd_tx.lock().clone();
         self.clear();
         if let Some(tx) = cmd_tx {
@@ -557,12 +555,16 @@ fn request_reopen(shared: &Shared, cmd_tx: Option<&Sender<AudioCmd>>) {
 
 fn apply_status(shared: &Shared, status: AudioOutputStatus) {
     *shared.status.lock() = status;
-    shared.output_enabled.store(
-        matches!(status, AudioOutputStatus::Ready),
-        Ordering::Release,
-    );
-    *shared.first_queued_at.lock() = None;
-    shared.queued_since_open.store(false, Ordering::Release);
+    let ready = matches!(status, AudioOutputStatus::Ready);
+    shared.output_enabled.store(ready, Ordering::Release);
+    if ready {
+        *shared.first_queued_at.lock() = None;
+        shared.queued_since_open.store(false, Ordering::Release);
+    } else {
+        *shared.first_queued_at.lock() = None;
+        shared.queued_since_open.store(false, Ordering::Release);
+        shared.output_enabled.store(false, Ordering::Release);
+    }
 }
 
 fn wait_device_cmd(
@@ -588,183 +590,29 @@ fn wait_device_cmd(
     }
 }
 
-fn output_device_candidates(selected: &Option<String>) -> Vec<(String, cpal::Device)> {
+fn resolve_device(name: &Option<String>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    let mut out = Vec::new();
-
-    if let Some(want) = selected {
-        if let Ok(devices) = host.output_devices() {
-            for device in devices {
-                let name = device.to_string();
-                if &name == want {
-                    out.push((name, device));
-                    break;
-                }
-            }
-        }
-        if out.is_empty() {
-            warn!("audio device `{want}` not found; falling back");
-        }
-    }
-
-    if let Some(device) = host.default_output_device() {
-        let name = device.to_string();
-        if !out.iter().any(|(known, _)| known == &name) {
-            out.push((name, device));
-        }
-    }
-
-    if let Ok(devices) = host.output_devices() {
+    if let Some(want) = name {
+        let devices = host.output_devices().map_err(|e| e.to_string())?;
         for device in devices {
-            let name = device.to_string();
-            if !out.iter().any(|(known, _)| known == &name) {
-                out.push((name, device));
+            if &device.to_string() == want {
+                return Ok(device);
             }
         }
+        return Err(format!("audio device `{want}` not found"));
     }
-    out
-}
-
-fn is_renderable_format(format: SampleFormat) -> bool {
-    !matches!(format, SampleFormat::I24 | SampleFormat::U24)
-}
-
-fn sample_format_priority(format: SampleFormat) -> u8 {
-    match format {
-        SampleFormat::F32 => 0,
-        SampleFormat::I16 => 1,
-        SampleFormat::U16 => 2,
-        SampleFormat::I32 => 3,
-        SampleFormat::F64 => 4,
-        SampleFormat::I8 => 5,
-        SampleFormat::U8 => 6,
-        SampleFormat::I64 => 7,
-        SampleFormat::U32 => 8,
-        SampleFormat::U64 => 9,
-        _ => 10,
-    }
-}
-
-fn stream_config_score(config: &cpal::SupportedStreamConfig) -> (u8, u32, u32) {
-    let rate_distance = (i64::from(config.sample_rate()) - 48_000).unsigned_abs() as u32;
-    let channel_distance = (i32::from(config.channels()) - 2).unsigned_abs();
-    (
-        sample_format_priority(config.sample_format()),
-        rate_distance,
-        channel_distance,
-    )
-}
-
-fn candidate_configs(device: &cpal::Device) -> Vec<cpal::SupportedStreamConfig> {
-    let mut out = Vec::new();
-    if let Ok(config) = device.default_output_config()
-        && is_renderable_format(config.sample_format())
-    {
-        out.push(config);
-    }
-    if let Ok(ranges) = device.supported_output_configs() {
-        for range in ranges {
-            if !is_renderable_format(range.sample_format()) {
-                continue;
-            }
-            let config = if range.contains_rate(48_000) {
-                range.try_with_sample_rate(48_000)
-            } else {
-                Some(range.with_max_sample_rate())
-            };
-            if let Some(config) = config {
-                out.push(config);
-            }
-        }
-    }
-    out.sort_by_key(stream_config_score);
-    out.dedup_by(|a, b| {
-        a.sample_format() == b.sample_format()
-            && a.sample_rate() == b.sample_rate()
-            && a.channels() == b.channels()
-    });
-    out.truncate(16);
-    out
-}
-
-fn reset_stream_state(shared: &Shared) {
-    shared.ring.lock().clear();
-    shared.pts_runs.lock().clear();
-    shared.playhead_valid.store(false, Ordering::Release);
-    *shared.last_playback_activity.lock() = None;
-    *shared.last_callback_at.lock() = None;
-    shared.queued_since_open.store(false, Ordering::Release);
-    *shared.first_queued_at.lock() = None;
-}
-
-/// Open the selected device, or fall back to the default and then any other
-/// output device / supported format.
-fn open_output_stream(
-    selected: &Option<String>,
-    shared: &Arc<Shared>,
-) -> Result<cpal::Stream, String> {
-    let mut last_error = String::from("no output device");
-    for (name, device) in output_device_candidates(selected) {
-        for config in candidate_configs(&device) {
-            let sample_format = config.sample_format();
-            let stream_config = config.config();
-            let stream = match build_stream_for_format(
-                &device,
-                sample_format,
-                &stream_config,
-                Arc::clone(shared),
-            ) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    last_error = format!("{name}: {e}");
-                    continue;
-                }
-            };
-            {
-                let mut geometry = shared.geometry.lock();
-                geometry.channels = stream_config.channels as usize;
-                geometry.rate = stream_config.sample_rate;
-            }
-            reset_stream_state(shared);
-            if let Err(e) = stream.play() {
-                last_error = format!("{name}: {e}");
-                continue;
-            }
-            *shared.active_device_name.lock() = Some(name.clone());
-            tracing::info!(
-                "audio output `{name}` ({} Hz, {} ch, {:?})",
-                stream_config.sample_rate,
-                stream_config.channels,
-                sample_format
-            );
-            return Ok(stream);
-        }
-    }
-    *shared.active_device_name.lock() = None;
-    Err(last_error)
+    host.default_output_device()
+        .ok_or_else(|| "no default output device".to_string())
 }
 
 fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> Result<(), String> {
     let mut selected = shared.device_name.lock().clone();
     loop {
         apply_status(&shared, AudioOutputStatus::Opening);
+        *shared.active_device_name.lock() = None;
         shared.needs_reopen.store(false, Ordering::Release);
-        match open_output_stream(&selected, &shared) {
-            Ok(stream) => {
-                apply_status(&shared, AudioOutputStatus::Ready);
-                match wait_device_cmd(&cmd_rx, &selected, &shared, false, REOPEN_POLL) {
-                    Some(name) => {
-                        drop(stream);
-                        selected = name;
-                        *shared.device_name.lock() = selected.clone();
-                    }
-                    None => {
-                        drop(stream);
-                        apply_status(&shared, AudioOutputStatus::Unavailable);
-                        return Ok(());
-                    }
-                }
-            }
+        let device = match resolve_device(&selected) {
+            Ok(d) => d,
             Err(e) => {
                 warn!("audio output unavailable: {e}");
                 apply_status(&shared, AudioOutputStatus::Unavailable);
@@ -776,6 +624,83 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
                     }
                     None => return Ok(()),
                 }
+            }
+        };
+
+        let supported = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("audio output config failed: {e}");
+                apply_status(&shared, AudioOutputStatus::Unavailable);
+                match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
+                    Some(name) => {
+                        selected = name;
+                        *shared.device_name.lock() = selected.clone();
+                        continue;
+                    }
+                    None => return Ok(()),
+                }
+            }
+        };
+        let sample_format = supported.sample_format();
+        let config: StreamConfig = supported.into();
+        {
+            let mut geo = shared.geometry.lock();
+            geo.channels = config.channels as usize;
+            geo.rate = config.sample_rate;
+        }
+        shared.ring.lock().clear();
+        shared.pts_runs.lock().clear();
+        shared.playhead_valid.store(false, Ordering::Release);
+        *shared.last_playback_activity.lock() = None;
+        *shared.last_callback_at.lock() = None;
+
+        let stream =
+            match build_stream_for_format(&device, sample_format, &config, Arc::clone(&shared)) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("audio stream build failed: {e}");
+                    apply_status(&shared, AudioOutputStatus::Unavailable);
+                    match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
+                        Some(name) => {
+                            selected = name;
+                            *shared.device_name.lock() = selected.clone();
+                            continue;
+                        }
+                        None => return Ok(()),
+                    }
+                }
+            };
+        if let Err(e) = stream.play() {
+            warn!("audio stream play failed: {e}");
+            drop(stream);
+            apply_status(&shared, AudioOutputStatus::Unavailable);
+            match wait_device_cmd(&cmd_rx, &selected, &shared, true, FAILED_OPEN_RETRY) {
+                Some(name) => {
+                    selected = name;
+                    *shared.device_name.lock() = selected.clone();
+                    continue;
+                }
+                None => return Ok(()),
+            }
+        }
+        let mut active_name = device.to_string();
+        if active_name.is_empty() {
+            active_name = selected.clone().unwrap_or_else(|| "default".into());
+        }
+        *shared.active_device_name.lock() = Some(active_name);
+        apply_status(&shared, AudioOutputStatus::Ready);
+
+        match wait_device_cmd(&cmd_rx, &selected, &shared, false, REOPEN_POLL) {
+            Some(name) => {
+                drop(stream);
+                selected = name;
+                *shared.device_name.lock() = selected.clone();
+            }
+            None => {
+                drop(stream);
+                apply_status(&shared, AudioOutputStatus::Unavailable);
+                return Ok(());
             }
         }
     }
@@ -789,15 +714,8 @@ fn build_stream_for_format(
 ) -> Result<cpal::Stream, String> {
     match sample_format {
         SampleFormat::F32 => build_stream::<f32>(device, config, shared),
-        SampleFormat::F64 => build_stream::<f64>(device, config, shared),
         SampleFormat::I16 => build_stream::<i16>(device, config, shared),
-        SampleFormat::I32 => build_stream::<i32>(device, config, shared),
-        SampleFormat::I64 => build_stream::<i64>(device, config, shared),
-        SampleFormat::I8 => build_stream::<i8>(device, config, shared),
         SampleFormat::U16 => build_stream::<u16>(device, config, shared),
-        SampleFormat::U32 => build_stream::<u32>(device, config, shared),
-        SampleFormat::U64 => build_stream::<u64>(device, config, shared),
-        SampleFormat::U8 => build_stream::<u8>(device, config, shared),
         other => Err(format!("unsupported sample format: {other:?}")),
     }
 }
@@ -987,32 +905,5 @@ mod tests {
         assert!((audio.levels().peak_l - 0.75).abs() < 1e-5);
         let sample = audio.shared.ring.lock()[0];
         assert!((sample - 0.375).abs() < 1e-5);
-    }
-
-    #[test]
-    fn prefers_float_then_16_bit_formats() {
-        assert!(
-            sample_format_priority(SampleFormat::F32) < sample_format_priority(SampleFormat::I16)
-        );
-        assert!(
-            sample_format_priority(SampleFormat::I16) < sample_format_priority(SampleFormat::I32)
-        );
-        assert!(
-            sample_format_priority(SampleFormat::I32) < sample_format_priority(SampleFormat::I64)
-        );
-    }
-
-    #[test]
-    fn skips_packed_24_bit_formats() {
-        assert!(!is_renderable_format(SampleFormat::I24));
-        assert!(!is_renderable_format(SampleFormat::U24));
-        assert!(is_renderable_format(SampleFormat::F32));
-    }
-
-    #[test]
-    fn active_device_name_is_reported() {
-        let audio = stub(AudioOutputStatus::Ready);
-        *audio.shared.active_device_name.lock() = Some("Test Output".into());
-        assert_eq!(audio.active_device_name().as_deref(), Some("Test Output"));
     }
 }

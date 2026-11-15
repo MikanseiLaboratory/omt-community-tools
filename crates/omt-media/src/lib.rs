@@ -18,7 +18,7 @@ pub use audio_out::{
 pub use color::{rgb_to_uyvy_pixel, uyvy_from_rgb_frame};
 pub use discovery::{
     DiscoveredSource, SourceBrowser, discover_sources, find_local_name_collision,
-    local_name_collision, spawn_discover, uniquify_source_name,
+    local_name_collision, spawn_discover,
 };
 pub use playout::{BufferSettings, BufferUnit, DelaySetting, PlayoutMode};
 pub use receive::{

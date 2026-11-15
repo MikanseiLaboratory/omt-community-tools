@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openmediatransport::{
     DecodedVideoGpuFrame, FrameType, GpuVideoContext, OmtError, Quality, ReceiverConfig,
@@ -18,14 +18,6 @@ use crate::runtime;
 use crate::stall::StallDetector;
 
 const METADATA_LOG_CAP: usize = 256;
-/// How long audio may be silent (while video keeps arriving) before recovery.
-const AUDIO_STALL_AFTER: Duration = Duration::from_secs(2);
-/// Wait this long after a recovery action before escalating.
-const AUDIO_RECOVERY_COOLDOWN: Duration = Duration::from_secs(3);
-/// Reopen the device once, then force at most this many session reconnects.
-const AUDIO_RECONNECT_MAX: u8 = 2;
-/// Video must have arrived this recently for audio recovery to be meaningful.
-const VIDEO_LIVE_WINDOW: Duration = Duration::from_secs(2);
 
 /// Connection / quality options for an inbound receive session.
 #[derive(Debug, Clone)]
@@ -402,80 +394,6 @@ fn push_log(latest: &LatestVideo, kind: &str, text: impl Into<String>) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AudioRecoveryAction {
-    None,
-    ReopenOutput,
-    ReconnectSession,
-    GiveUp,
-}
-
-/// Detects "video is fine but audio never came back" and escalates recovery.
-#[derive(Debug, Default)]
-struct AudioRecovery {
-    ever_received: bool,
-    last_audio: Option<Instant>,
-    last_action: Option<Instant>,
-    /// 0 = idle, 1 = output reopened, 2 = session reconnecting, 3 = gave up.
-    stage: u8,
-    forced_reconnects: u8,
-}
-
-impl AudioRecovery {
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    fn on_audio(&mut self, now: Instant) {
-        self.ever_received = true;
-        self.last_audio = Some(now);
-        self.stage = 0;
-        self.last_action = None;
-    }
-
-    /// Give a freshly reconnected session a full stall window before escalating.
-    fn on_reconnect(&mut self, now: Instant) {
-        self.last_audio = Some(now);
-        self.last_action = Some(now);
-        self.stage = 1;
-    }
-
-    fn poll(&mut self, now: Instant, connected: bool, video_live: bool) -> AudioRecoveryAction {
-        if !connected || !video_live || !self.ever_received {
-            return AudioRecoveryAction::None;
-        }
-        let Some(last_audio) = self.last_audio else {
-            return AudioRecoveryAction::None;
-        };
-        if now.saturating_duration_since(last_audio) < AUDIO_STALL_AFTER {
-            return AudioRecoveryAction::None;
-        }
-        if self.stage >= 3 {
-            return AudioRecoveryAction::None;
-        }
-        if self.stage == 0 {
-            self.stage = 1;
-            self.last_action = Some(now);
-            return AudioRecoveryAction::ReopenOutput;
-        }
-
-        let cooled_down = self
-            .last_action
-            .is_none_or(|at| now.saturating_duration_since(at) >= AUDIO_RECOVERY_COOLDOWN);
-        if !cooled_down {
-            return AudioRecoveryAction::None;
-        }
-        if self.forced_reconnects >= AUDIO_RECONNECT_MAX {
-            self.stage = 3;
-            return AudioRecoveryAction::GiveUp;
-        }
-        self.forced_reconnects += 1;
-        self.stage = 2;
-        self.last_action = Some(now);
-        AudioRecoveryAction::ReconnectSession
-    }
-}
-
 async fn worker_loop(
     mut rx: mpsc::UnboundedReceiver<ReceiveCommand>,
     latest: Arc<LatestVideo>,
@@ -488,10 +406,7 @@ async fn worker_loop(
     let mut playout = Playout::default();
     let mut gpu_decode = false;
     let mut gpu_ctx: Option<GpuVideoContext> = None;
-    let mut last_connect: Option<ConnectOptions> = None;
     let mut last_reconnects = 0u64;
-    let mut last_video_at: Option<Instant> = None;
-    let mut recovery = AudioRecovery::default();
     publish_buffer_delays(&latest, &playout);
 
     loop {
@@ -532,16 +447,10 @@ async fn worker_loop(
             apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
             gpu_decode = false;
             gpu_ctx = None;
-            last_connect = None;
             last_reconnects = 0;
-            last_video_at = None;
-            recovery.reset();
         }
         if let Some(opts) = pending_connect {
-            last_connect = Some(opts.clone());
             last_reconnects = 0;
-            last_video_at = None;
-            recovery.reset();
             gpu_decode = apply_connect(
                 opts,
                 &mut receiver,
@@ -593,16 +502,10 @@ async fn worker_loop(
                         apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
                         gpu_decode = false;
                         gpu_ctx = None;
-                        last_connect = None;
                         last_reconnects = 0;
-                        last_video_at = None;
-                        recovery.reset();
                     }
                     if let Some(opts) = pending_connect {
-                        last_connect = Some(opts.clone());
                         last_reconnects = 0;
-                        last_video_at = None;
-                        recovery.reset();
                         gpu_decode = apply_connect(
                             opts,
                             &mut receiver,
@@ -627,11 +530,7 @@ async fn worker_loop(
 
         // Feed the DAC before any video wait. GPU copy/submit on the eframe
         // device can stall while the window is occluded; audio must not wait.
-        let (got_audio, mut got_any) =
-            drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
-        if got_audio {
-            recovery.on_audio(Instant::now());
-        }
+        let mut got_any = drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
         playout.release(&latest, &audio);
 
         if gpu_decode {
@@ -641,12 +540,10 @@ async fn worker_loop(
                         recv.recv_video_gpu_timeout(Duration::from_millis(5))
                     }) {
                         ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
-                        last_video_at = Some(Instant::now());
                         got_any = true;
                     }
                     while let Some(frame) = recv.try_recv_video_gpu() {
                         ingest_gpu_video(&latest, &stall, gpu_ctx.as_ref(), &mut playout, frame);
-                        last_video_at = Some(Instant::now());
                         got_any = true;
                     }
                 } else {
@@ -662,32 +559,36 @@ async fn worker_loop(
                 tokio::task::block_in_place(|| recv.recv_video_timeout(Duration::from_millis(5)))
             {
                 ingest_video(&latest, &stall, &mut playout, frame);
-                last_video_at = Some(Instant::now());
                 got_any = true;
             }
             while let Some(frame) = recv.try_recv_video() {
                 ingest_video(&latest, &stall, &mut playout, frame);
-                last_video_at = Some(Instant::now());
                 got_any = true;
             }
         }
-        let (got_audio, got_any_after) =
-            drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
-        if got_audio {
-            recovery.on_audio(Instant::now());
-        }
-        got_any |= got_any_after;
+        got_any |= drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
 
-        let (state, stats, last_error) = {
-            let Some(recv) = receiver.as_ref() else {
-                continue;
-            };
-            if !got_any {
-                stall.lock().tick();
-            }
-            (recv.state(), recv.statistics(), recv.last_error())
+        let Some(recv) = receiver.as_ref() else {
+            continue;
         };
+
+        if !got_any {
+            stall.lock().tick();
+        }
+        let stats = recv.statistics();
         *latest.stats.lock() = stats;
+        if stats.reconnects > last_reconnects {
+            last_reconnects = stats.reconnects;
+            playout.reset();
+            audio.clear();
+            publish_buffer_delays(&latest, &playout);
+            push_log(
+                latest.as_ref(),
+                "audio",
+                "session reconnected; A/V buffers reset",
+            );
+        }
+        let state = recv.state();
         let prev = *latest.session_state.lock();
         *latest.session_state.lock() = state;
         if state != prev {
@@ -697,95 +598,23 @@ async fn worker_loop(
             }
         }
         if state != SessionState::Connected
-            && let Some(err) = last_error
+            && let Some(err) = recv.last_error()
         {
             *latest.error.lock() = Some(err);
         }
-
-        // OMT reconnected one or both sockets. Re-anchor our own media clock and
-        // drop stale PCM so audio can start again from the new timeline.
-        if stats.reconnects > last_reconnects {
-            last_reconnects = stats.reconnects;
-            playout.reset();
-            audio.clear();
-            publish_buffer_delays(&latest, &playout);
-            recovery.on_reconnect(Instant::now());
-            push_log(
-                latest.as_ref(),
-                "audio",
-                "session reconnected; A/V buffers reset",
-            );
-        }
-
         playout.release(&latest, &audio);
         publish_buffer_delays(&latest, &playout);
-
-        let video_live = last_video_at.is_some_and(|at| at.elapsed() <= VIDEO_LIVE_WINDOW);
-        match recovery.poll(Instant::now(), state == SessionState::Connected, video_live) {
-            AudioRecoveryAction::None => {}
-            AudioRecoveryAction::ReopenOutput => {
-                audio.reopen();
-                playout.reset();
-                publish_buffer_delays(&latest, &playout);
-                push_log(
-                    latest.as_ref(),
-                    "audio",
-                    "audio stalled; reopening output device",
-                );
-            }
-            AudioRecoveryAction::ReconnectSession => {
-                push_log(
-                    latest.as_ref(),
-                    "audio",
-                    "audio still silent; reconnecting session",
-                );
-                if let Some(opts) = last_connect.clone() {
-                    match reconnect_current(
-                        opts,
-                        &mut receiver,
-                        &latest,
-                        &stall,
-                        &audio,
-                        &mut playout,
-                        &gpu_slot,
-                    )
-                    .await
-                    {
-                        Ok(gpu) => {
-                            gpu_decode = gpu;
-                            gpu_ctx = if gpu { gpu_slot.lock().clone() } else { None };
-                            last_reconnects = 0;
-                            last_video_at = None;
-                            recovery.on_reconnect(Instant::now());
-                        }
-                        Err(e) => {
-                            push_log(latest.as_ref(), "error", e);
-                        }
-                    }
-                }
-            }
-            AudioRecoveryAction::GiveUp => {
-                *latest.error.lock() = Some("audio did not recover".into());
-                push_log(
-                    latest.as_ref(),
-                    "error",
-                    "audio did not recover after reconnect attempts",
-                );
-            }
-        }
     }
 }
 
-/// Drain pending audio and metadata. Returns `(got_audio, got_any)`.
 fn drain_audio_and_meta(
     recv: Option<&ReceiverSession>,
     latest: &LatestVideo,
     playout: &mut Playout,
-) -> (bool, bool) {
+) -> bool {
     let Some(recv) = recv else {
-        return (false, false);
+        return false;
     };
-    let mut got_audio = false;
     let mut got_any = false;
     while let Some(packet) = recv.try_recv_audio() {
         playout.push_audio(
@@ -795,14 +624,13 @@ fn drain_audio_and_meta(
             packet.samples_per_channel,
             packet.sample_rate,
         );
-        got_audio = true;
         got_any = true;
     }
     while let Some(meta) = recv.try_recv_metadata() {
         push_log(latest, "metadata", meta.xml.to_string());
         got_any = true;
     }
-    (got_audio, got_any)
+    got_any
 }
 
 fn ingest_video(
@@ -963,62 +791,6 @@ async fn apply_connect(
     }
 }
 
-/// Re-open the current source without clearing the user-facing URL / counters.
-///
-/// Used by the audio watchdog after the OMT session's own audio socket has
-/// stopped delivering but video is still flowing.
-async fn reconnect_current(
-    opts: ConnectOptions,
-    receiver: &mut Option<ReceiverSession>,
-    latest: &LatestVideo,
-    stall: &Mutex<StallDetector>,
-    audio: &AudioOutput,
-    playout: &mut Playout,
-    gpu_slot: &Mutex<Option<GpuVideoContext>>,
-) -> Result<bool, String> {
-    if let Some(old) = receiver.take() {
-        old.disconnect();
-    }
-    *latest.session_state.lock() = SessionState::Connecting;
-    latest.clear_video();
-    playout.reset();
-    audio.clear();
-    publish_buffer_delays(latest, playout);
-    stall.lock().reset();
-
-    let url = opts.url.clone();
-    let want_gpu = opts.video_decode == VideoDecodePath::Gpu;
-    let gpu = if want_gpu {
-        gpu_slot.lock().clone()
-    } else {
-        None
-    };
-    let gpu_active = want_gpu && gpu.is_some();
-    match open_receiver(opts, gpu).await {
-        Ok(r) => {
-            *latest.session_state.lock() = r.state();
-            *receiver = Some(r);
-            let path = if gpu_active {
-                VideoDecodePath::Gpu
-            } else {
-                VideoDecodePath::Cpu
-            };
-            *latest.video_decode.lock() = Some(path);
-            *latest.error.lock() = None;
-            push_log(latest, "info", format!("reconnected {url}"));
-            Ok(gpu_active)
-        }
-        Err(e) => {
-            *receiver = None;
-            *latest.session_state.lock() = SessionState::Stopped;
-            *latest.video_decode.lock() = None;
-            *latest.error.lock() = Some(e.to_string());
-            push_log(latest, "error", e.to_string());
-            Err(e.to_string())
-        }
-    }
-}
-
 fn apply_disconnect(
     receiver: &mut Option<ReceiverSession>,
     latest: &LatestVideo,
@@ -1062,102 +834,4 @@ async fn open_receiver(
     })
     .await
     .map_err(|e| OmtError::Network(e.to_string()))?
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AUDIO_RECOVERY_COOLDOWN, AUDIO_STALL_AFTER, AudioRecovery, AudioRecoveryAction};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn audio_recovery_waits_for_video_and_audio_then_escalates() {
-        let mut recovery = AudioRecovery::default();
-        let t0 = Instant::now();
-
-        // Never received audio: nothing to recover.
-        assert_eq!(
-            recovery.poll(t0 + AUDIO_STALL_AFTER, true, true),
-            AudioRecoveryAction::None
-        );
-
-        recovery.on_audio(t0);
-        // Video is not flowing: do not treat audio silence as a fault.
-        assert_eq!(
-            recovery.poll(t0 + AUDIO_STALL_AFTER, true, false),
-            AudioRecoveryAction::None
-        );
-        assert_eq!(
-            recovery.poll(t0 + AUDIO_STALL_AFTER, true, true),
-            AudioRecoveryAction::ReopenOutput
-        );
-        assert_eq!(
-            recovery.poll(t0 + AUDIO_STALL_AFTER + AUDIO_RECOVERY_COOLDOWN, true, true),
-            AudioRecoveryAction::ReconnectSession
-        );
-        assert_eq!(
-            recovery.poll(
-                t0 + AUDIO_STALL_AFTER + AUDIO_RECOVERY_COOLDOWN * 2,
-                true,
-                true
-            ),
-            AudioRecoveryAction::ReconnectSession
-        );
-        assert_eq!(
-            recovery.poll(
-                t0 + AUDIO_STALL_AFTER + AUDIO_RECOVERY_COOLDOWN * 3,
-                true,
-                true
-            ),
-            AudioRecoveryAction::GiveUp
-        );
-        assert_eq!(
-            recovery.poll(
-                t0 + AUDIO_STALL_AFTER + AUDIO_RECOVERY_COOLDOWN * 4,
-                true,
-                true
-            ),
-            AudioRecoveryAction::None
-        );
-    }
-
-    #[test]
-    fn audio_recovery_resets_when_audio_resumes() {
-        let mut recovery = AudioRecovery::default();
-        let t0 = Instant::now();
-        recovery.on_audio(t0);
-        assert_eq!(
-            recovery.poll(t0 + AUDIO_STALL_AFTER, true, true),
-            AudioRecoveryAction::ReopenOutput
-        );
-        recovery.on_audio(t0 + AUDIO_STALL_AFTER);
-        assert_eq!(
-            recovery.poll(
-                t0 + AUDIO_STALL_AFTER + Duration::from_millis(500),
-                true,
-                true
-            ),
-            AudioRecoveryAction::None
-        );
-    }
-
-    #[test]
-    fn auto_reconnect_gets_a_fresh_stall_window() {
-        let mut recovery = AudioRecovery::default();
-        let t0 = Instant::now();
-        recovery.on_audio(t0);
-        let reconnected = t0 + AUDIO_STALL_AFTER;
-        recovery.on_reconnect(reconnected);
-        assert_eq!(
-            recovery.poll(reconnected + Duration::from_millis(500), true, true),
-            AudioRecoveryAction::None
-        );
-        assert_eq!(
-            recovery.poll(
-                reconnected + AUDIO_STALL_AFTER + AUDIO_RECOVERY_COOLDOWN,
-                true,
-                true
-            ),
-            AudioRecoveryAction::ReconnectSession
-        );
-    }
 }
