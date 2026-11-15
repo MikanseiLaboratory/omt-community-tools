@@ -199,6 +199,8 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::Japanese, "monitor.audio_volume") => "音量",
         (Language::English, "monitor.audio_output") => "Audio output",
         (Language::Japanese, "monitor.audio_output") => "音声出力先",
+        (Language::English, "monitor.audio_active") => "Active output",
+        (Language::Japanese, "monitor.audio_active") => "使用中の出力",
         (Language::English, "monitor.audio_default") => "System default",
         (Language::Japanese, "monitor.audio_default") => "システム既定",
         (Language::English, "monitor.audio_system_default") => "default",
@@ -300,6 +302,12 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         }
         (Language::Japanese, "patterns.restart_required") => {
             "ソース名・解像度・フレームレートを変更するには送出を停止してください"
+        }
+        (Language::English, "patterns.name_in_use") => {
+            "Another live source on this machine is already using this name. Stop it or choose a unique name."
+        }
+        (Language::Japanese, "patterns.name_in_use") => {
+            "このマシンで同名のソースが既に動作しています。停止するか別の名前にしてください。"
         }
         (Language::English, "patterns.pattern") => "Pattern",
         (Language::Japanese, "patterns.pattern") => "パターン",
@@ -546,6 +554,7 @@ mod tests {
             "monitor.stalled",
             "patterns.start",
             "patterns.restart_required",
+            "patterns.name_in_use",
             "config.path",
             "config.port_range",
             "config.xml_preview",

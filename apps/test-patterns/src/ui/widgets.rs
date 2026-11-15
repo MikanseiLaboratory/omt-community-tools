@@ -68,6 +68,12 @@ pub(crate) fn stats_block(
             t(language, "patterns.audio_subs"),
             format!("{}", stats.audio_subscribers),
         ))
+        .child(stat_row("Audio TX", format!("{}", stats.audio_frames)))
+        .child(stat_row(
+            "Audio gap",
+            format!("{:.1} ms", stats.audio_max_gap_ms),
+        ))
+        .child(stat_row("Audio skips", format!("{}", stats.audio_skips)))
         .child(stat_row("Port", format!("{}", stats.port)))
         .child(stat_row("Video FPS", format!("{:.1}", stats.video_fps)))
         .child(stat_row("Encode", format!("{:.1} ms", stats.encode_ms)))

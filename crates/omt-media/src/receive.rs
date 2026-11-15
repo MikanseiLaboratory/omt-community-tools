@@ -406,6 +406,7 @@ async fn worker_loop(
     let mut playout = Playout::default();
     let mut gpu_decode = false;
     let mut gpu_ctx: Option<GpuVideoContext> = None;
+    let mut last_reconnects = 0u64;
     publish_buffer_delays(&latest, &playout);
 
     loop {
@@ -446,8 +447,10 @@ async fn worker_loop(
             apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
             gpu_decode = false;
             gpu_ctx = None;
+            last_reconnects = 0;
         }
         if let Some(opts) = pending_connect {
+            last_reconnects = 0;
             gpu_decode = apply_connect(
                 opts,
                 &mut receiver,
@@ -499,8 +502,10 @@ async fn worker_loop(
                         apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
                         gpu_decode = false;
                         gpu_ctx = None;
+                        last_reconnects = 0;
                     }
                     if let Some(opts) = pending_connect {
+                        last_reconnects = 0;
                         gpu_decode = apply_connect(
                             opts,
                             &mut receiver,
@@ -570,7 +575,19 @@ async fn worker_loop(
         if !got_any {
             stall.lock().tick();
         }
-        *latest.stats.lock() = recv.statistics();
+        let stats = recv.statistics();
+        *latest.stats.lock() = stats;
+        if stats.reconnects > last_reconnects {
+            last_reconnects = stats.reconnects;
+            playout.reset();
+            audio.clear();
+            publish_buffer_delays(&latest, &playout);
+            push_log(
+                latest.as_ref(),
+                "audio",
+                "session reconnected; A/V buffers reset",
+            );
+        }
         let state = recv.state();
         let prev = *latest.session_state.lock();
         *latest.session_state.lock() = state;

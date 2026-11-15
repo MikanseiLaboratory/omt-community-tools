@@ -108,6 +108,8 @@ struct Shared {
     geometry: Mutex<DeviceGeometry>,
     /// `None` = system default output.
     device_name: Mutex<Option<String>>,
+    /// Device actually opened.
+    active_device_name: Mutex<Option<String>>,
     /// PTS currently being output (valid when `playhead_valid`).
     playhead_pts: AtomicI64,
     playhead_valid: AtomicBool,
@@ -163,6 +165,7 @@ impl AudioOutput {
                 rate: 48_000,
             }),
             device_name: Mutex::new(None),
+            active_device_name: Mutex::new(None),
             playhead_pts: AtomicI64::new(0),
             playhead_valid: AtomicBool::new(false),
             last_playback_activity: Mutex::new(None),
@@ -203,6 +206,11 @@ impl AudioOutput {
         self.shared.device_name.lock().clone()
     }
 
+    /// Device that is actually open.
+    pub fn active_device_name(&self) -> Option<String> {
+        self.shared.active_device_name.lock().clone()
+    }
+
     /// Snapshot of whether PCM is actually being sent to a device.
     pub fn status(&self) -> AudioOutputStatus {
         *self.shared.status.lock()
@@ -211,8 +219,11 @@ impl AudioOutput {
     /// Switch output device. `None` selects the system default.
     pub fn set_output_device(&self, name: Option<String>) {
         *self.shared.device_name.lock() = name.clone();
+        // Clone the command sender before touching the ring so this can never
+        // deadlock against `request_reopen` (which takes the ring first).
+        let cmd_tx = self.cmd_tx.lock().clone();
         self.clear();
-        if let Some(tx) = self.cmd_tx.lock().as_ref() {
+        if let Some(tx) = cmd_tx {
             self.shared.needs_reopen.store(false, Ordering::Release);
             apply_status(&self.shared, AudioOutputStatus::Opening);
             let _ = tx.send(AudioCmd::SetDevice(name));
@@ -280,6 +291,10 @@ impl AudioOutput {
         self.shared.pts_runs.lock().clear();
         *self.shared.levels.lock() = AudioLevels::default();
         *self.shared.last_playback_activity.lock() = None;
+        self.shared
+            .queued_since_open
+            .store(false, Ordering::Release);
+        *self.shared.first_queued_at.lock() = None;
         self.invalidate_playhead();
     }
 
@@ -429,7 +444,8 @@ impl AudioOutput {
             }
         }
         warn!("audio output opened but is not being pulled; reopening");
-        request_reopen(&self.shared, self.cmd_tx.lock().as_ref());
+        let cmd_tx = self.cmd_tx.lock().clone();
+        request_reopen(&self.shared, cmd_tx.as_ref());
     }
 
     fn record_silent_packet(&self, sample_rate: i32, channels: i32) {
@@ -583,7 +599,7 @@ fn resolve_device(name: &Option<String>) -> Result<cpal::Device, String> {
                 return Ok(device);
             }
         }
-        warn!("audio device `{want}` not found; falling back to default");
+        return Err(format!("audio device `{want}` not found"));
     }
     host.default_output_device()
         .ok_or_else(|| "no default output device".to_string())
@@ -593,6 +609,7 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
     let mut selected = shared.device_name.lock().clone();
     loop {
         apply_status(&shared, AudioOutputStatus::Opening);
+        *shared.active_device_name.lock() = None;
         shared.needs_reopen.store(false, Ordering::Release);
         let device = match resolve_device(&selected) {
             Ok(d) => d,
@@ -667,6 +684,11 @@ fn run_output_thread(shared: Arc<Shared>, cmd_rx: mpsc::Receiver<AudioCmd>) -> R
                 None => return Ok(()),
             }
         }
+        let mut active_name = device.to_string();
+        if active_name.is_empty() {
+            active_name = selected.clone().unwrap_or_else(|| "default".into());
+        }
+        *shared.active_device_name.lock() = Some(active_name);
         apply_status(&shared, AudioOutputStatus::Ready);
 
         match wait_device_cmd(&cmd_rx, &selected, &shared, false, REOPEN_POLL) {
@@ -768,6 +790,7 @@ mod tests {
                 rate: 48_000,
             }),
             device_name: Mutex::new(None),
+            active_device_name: Mutex::new(None),
             playhead_pts: AtomicI64::new(0),
             playhead_valid: AtomicBool::new(false),
             last_playback_activity: Mutex::new(None),

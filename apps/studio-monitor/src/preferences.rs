@@ -81,6 +81,7 @@ pub fn show(
     settings: &MonitorSettings,
     audio_devices: &[AudioOutputDevice],
     selected_audio: Option<&str>,
+    active_audio: Option<&str>,
     audio_unavailable: bool,
     gpu_available: Option<bool>,
     buffer: BufferSettings,
@@ -319,6 +320,17 @@ pub fn show(
                                     }
                                 });
                         });
+                    if let Some(active) = active_audio {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "{}: {active}",
+                                t(language, "monitor.audio_active")
+                            ))
+                            .small()
+                            .color(chrome.text_muted),
+                        );
+                    }
                     if audio_unavailable {
                         ui.add_space(6.0);
                         ui.label(

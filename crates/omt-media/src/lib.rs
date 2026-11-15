@@ -17,8 +17,8 @@ pub use audio_out::{
 };
 pub use color::{rgb_to_uyvy_pixel, uyvy_from_rgb_frame};
 pub use discovery::{
-    DiscoveredSource, SourceBrowser, discover_sources, spawn_discover, uniquify_local_source_name,
-    uniquify_source_name,
+    DiscoveredSource, SourceBrowser, discover_sources, find_local_name_collision,
+    local_name_collision, spawn_discover,
 };
 pub use playout::{BufferSettings, BufferUnit, DelaySetting, PlayoutMode};
 pub use receive::{
@@ -33,13 +33,13 @@ pub use send::{
 pub use stall::{StallDetector, StallState};
 pub use stats::FpsCounter;
 
+pub use openmediatransport::vmx::{
+    Codec as VmxCodec, Config as VmxConfig, Profile as VmxProfile,
+    SimdCapabilities as VmxSimdCapabilities, SimdPath as VmxSimdPath,
+};
 pub use openmediatransport::{
     Codec, ColorSpace, DecodedAudioFrame, DecodedVideoFrame, DecodedVideoGpuFrame, Discovery,
     FrameType, GpuVideoContext, MediaFrame, MetadataFrame, Quality, ReceiverConfig,
     ReceiverSession, Sender, SenderConfig, SenderInfo, SessionState, SessionStatistics, Statistics,
     bgra_alpha_mask, bgra_to_rgba, bgra_to_rgba_into,
-};
-pub use vmx::{
-    Codec as VmxCodec, Config as VmxConfig, Profile as VmxProfile,
-    SimdCapabilities as VmxSimdCapabilities, SimdPath as VmxSimdPath,
 };
