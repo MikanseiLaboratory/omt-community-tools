@@ -290,6 +290,114 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::English, "monitor.disconnect") => "Disconnect",
         (Language::Japanese, "monitor.disconnect") => "切断",
 
+        // Monitor clean feed output
+        (Language::English, "monitor.output") => "Clean feed",
+        (Language::Japanese, "monitor.output") => "クリーンフィード",
+        (Language::English, "monitor.output_section") => "Clean feed output",
+        (Language::Japanese, "monitor.output_section") => "クリーンフィード出力",
+        (Language::English, "monitor.output_description") => {
+            "Send a clean feed — the picture without the operator UI — borderless fullscreen to another display."
+        }
+        (Language::Japanese, "monitor.output_description") => {
+            "操作UIのないクリーンな映像を、別のディスプレイへ枠なし全画面で出力します。"
+        }
+        (Language::English, "monitor.output_display") => "Clean feed display",
+        (Language::Japanese, "monitor.output_display") => "クリーンフィードの出力先",
+        (Language::English, "monitor.output_send") => "Send clean feed",
+        (Language::Japanese, "monitor.output_send") => "クリーンフィードを出力",
+        (Language::English, "monitor.output_stop") => "Stop clean feed",
+        (Language::Japanese, "monitor.output_stop") => "クリーンフィードを停止",
+        (Language::English, "monitor.output_running") => "Clean feed running",
+        (Language::Japanese, "monitor.output_running") => "クリーンフィード出力中",
+        (Language::English, "monitor.output_auto") => "Automatic (other display)",
+        (Language::Japanese, "monitor.output_auto") => "自動（別のディスプレイ）",
+        (Language::English, "monitor.output_primary") => "Primary",
+        (Language::Japanese, "monitor.output_primary") => "メイン",
+        (Language::English, "monitor.output_here") => "This window",
+        (Language::Japanese, "monitor.output_here") => "このウィンドウ",
+        (Language::English, "monitor.output_refresh_displays") => "Refresh displays",
+        (Language::Japanese, "monitor.output_refresh_displays") => "ディスプレイを再検出",
+        (Language::English, "monitor.output_no_second_display") => {
+            "Connect a second display in extended mode to use the clean feed."
+        }
+        (Language::Japanese, "monitor.output_no_second_display") => {
+            "クリーンフィードを使うには、セカンドディスプレイを拡張表示で接続してください。"
+        }
+        (Language::English, "monitor.output_same_display") => {
+            "Choose a display other than the one running Studio Monitor."
+        }
+        (Language::Japanese, "monitor.output_same_display") => {
+            "Studio Monitor を表示しているディスプレイ以外を選んでください。"
+        }
+        (Language::English, "monitor.output_missing_display") => {
+            "The clean feed display is no longer connected."
+        }
+        (Language::Japanese, "monitor.output_missing_display") => {
+            "クリーンフィードの出力先ディスプレイが見つかりません。"
+        }
+        (Language::English, "monitor.output_operator_unknown") => {
+            "This platform does not report which display runs Studio Monitor. Choose a clean feed display manually."
+        }
+        (Language::Japanese, "monitor.output_operator_unknown") => {
+            "この環境では Studio Monitor を表示しているディスプレイを判別できません。クリーンフィードの出力先を手動で選んでください。"
+        }
+        (Language::English, "monitor.output_hint") => {
+            "The operator window stays here. The clean feed opens borderless fullscreen on the selected display."
+        }
+        (Language::Japanese, "monitor.output_hint") => {
+            "操作画面はこのディスプレイのまま、選択したディスプレイにクリーンフィードを枠なし全画面で表示します。"
+        }
+        (Language::English, "monitor.output_clean_hint") => {
+            "The clean feed is picture-only by default. Turn on only what the operator needs to see."
+        }
+        (Language::Japanese, "monitor.output_clean_hint") => {
+            "クリーンフィードは既定では映像のみです。演者に見せたいものだけオンにしてください。"
+        }
+        (Language::English, "monitor.output_overlays") => "Clean feed overlays",
+        (Language::Japanese, "monitor.output_overlays") => "クリーンフィードのオーバーレイ",
+        (Language::English, "monitor.output_window") => "Clean feed window",
+        (Language::Japanese, "monitor.output_window") => "クリーンフィードのウィンドウ",
+        (Language::English, "monitor.output_show_cursor") => "Show cursor",
+        (Language::Japanese, "monitor.output_show_cursor") => "カーソルを表示",
+        (Language::English, "monitor.output_always_on_top") => "Always on top",
+        (Language::Japanese, "monitor.output_always_on_top") => "常に最前面",
+        (Language::English, "monitor.output_window_hint") => {
+            "Show the mouse pointer on the clean feed and keep the window above other apps."
+        }
+        (Language::Japanese, "monitor.output_window_hint") => {
+            "クリーンフィード上にマウスカーソルを表示し、他のウィンドウより前面に保ちます。"
+        }
+        (Language::English, "monitor.output_tally") => "Tally border",
+        (Language::Japanese, "monitor.output_tally") => "タリー枠",
+        (Language::English, "monitor.output_warnings") => "Warnings",
+        (Language::Japanese, "monitor.output_warnings") => "警告表示",
+        (Language::English, "monitor.output_window_title") => "OMT Studio Monitor — Clean Feed",
+        (Language::Japanese, "monitor.output_window_title") => {
+            "OMT Studio Monitor — クリーンフィード"
+        }
+        (Language::English, "monitor.output_connecting") => "CONNECTING…",
+        (Language::Japanese, "monitor.output_connecting") => "接続中…",
+        (Language::English, "monitor.output_reconnecting") => "RECONNECTING",
+        (Language::Japanese, "monitor.output_reconnecting") => "再接続中",
+        (Language::English, "monitor.output_no_signal") => "NO SIGNAL",
+        (Language::Japanese, "monitor.output_no_signal") => "信号なし",
+        (Language::English, "monitor.output_pgm") => "PGM",
+        (Language::Japanese, "monitor.output_pgm") => "PGM",
+        (Language::English, "monitor.output_tooltip") => {
+            "Send the clean feed borderless fullscreen to another display (F9)."
+        }
+        (Language::Japanese, "monitor.output_tooltip") => {
+            "クリーンフィードを別のディスプレイへ枠なし全画面で出力します（F9）"
+        }
+        (Language::English, "monitor.output_stop_tooltip") => "Stop the clean feed (F9).",
+        (Language::Japanese, "monitor.output_stop_tooltip") => "クリーンフィードを停止します（F9）",
+        (Language::English, "monitor.output_alpha_note") => {
+            "Alpha mask preview also changes the clean feed picture, so it is turned off when the clean feed starts."
+        }
+        (Language::Japanese, "monitor.output_alpha_note") => {
+            "アルファマスク表示はクリーンフィードの映像にも反映されます。出力開始時にオフになります。"
+        }
+
         // Patterns
         (Language::English, "patterns.start") => "Start",
         (Language::Japanese, "patterns.start") => "開始",
@@ -552,6 +660,17 @@ mod tests {
             "tool.config_manager",
             "tool.discovery_server",
             "monitor.stalled",
+            "monitor.output",
+            "monitor.output_section",
+            "monitor.output_display",
+            "monitor.output_no_second_display",
+            "monitor.output_same_display",
+            "monitor.output_tally",
+            "monitor.output_warnings",
+            "monitor.output_window",
+            "monitor.output_show_cursor",
+            "monitor.output_always_on_top",
+            "monitor.output_window_title",
             "patterns.start",
             "patterns.restart_required",
             "patterns.name_in_use",

@@ -16,13 +16,14 @@ use omt_media::{
     list_output_devices, spawn_discover,
 };
 use suite_core::{
-    Language, SUITE_VERSION, SimdCapabilities, StudioMonitorConfig, ThemePreference,
-    install_egui_cjk_fonts, load_config, load_studio_monitor_config, save_config,
+    Language, OutputDisplayRef, SUITE_VERSION, SimdCapabilities, StudioMonitorConfig,
+    ThemePreference, install_egui_cjk_fonts, load_config, load_studio_monitor_config, save_config,
     save_studio_monitor_config, t,
 };
 
 use crate::chrome::UiChrome;
 use crate::frame_prep::{FramePrep, PrepControl};
+use crate::output::{self, DisplayInfo, OutputError, OutputSnapshot, OutputStatus, OutputVideo};
 use crate::preferences::{self, BufferEditState, PrefsAction};
 use crate::settings::{self, MonitorSettings};
 
@@ -43,8 +44,6 @@ const PREVIEW_MIN_W: f32 = 160.0;
 /// Outer inset + gap between chrome panels (sidebar / preview / stats / log).
 const LAYOUT_GAP: f32 = 14.0;
 const TOOLBAR_H: f32 = 48.0;
-const ACTION_SAFE_FRAC: f32 = 0.93;
-const TITLE_SAFE_FRAC: f32 = 0.90;
 
 fn wgpu_options_with_bgra_storage() -> eframe::WgpuConfiguration {
     let mut config = eframe::WgpuConfiguration::default();
@@ -167,8 +166,38 @@ struct MonitorApp {
     stats_video_open: bool,
     stats_audio_open: bool,
     stats_source_open: bool,
+    /// Displays reported by the OS, refreshed periodically.
+    displays: Vec<DisplayInfo>,
+    /// Index of the display that currently holds the operator window.
+    operator_display: Option<usize>,
+    /// Last known window rectangle, used to refresh displays after a move.
+    last_outer_rect: Option<egui::Rect>,
+    displays_refreshed_at: Instant,
+    displays_dirty: bool,
+    /// Whether the clean-feed viewport should be shown.
+    output_open: bool,
+    /// A start request waiting for a fresh display scan.
+    pending_output_start: bool,
+    /// Resolved display index for the output window.
+    output_monitor: Option<usize>,
+    /// Display the output was started on, used to detect reordering / unplug.
+    output_target: Option<OutputTarget>,
+    output_error: Option<OutputError>,
+    output_snapshot: Arc<parking_lot::Mutex<OutputSnapshot>>,
+    /// Frames left to pull focus back to the operator window after the clean
+    /// feed is created or destroyed.
+    output_focus_reclaim: u8,
+    /// Latest stall state, used by the output status overlay.
+    stall_state: StallState,
     /// Row-padded staging for `queue.write_texture` (256-byte alignment).
     cpu_upload_pad: Vec<u8>,
+}
+
+/// Display the clean feed was started on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputTarget {
+    index: usize,
+    name: Option<String>,
 }
 
 impl MonitorApp {
@@ -191,6 +220,7 @@ impl MonitorApp {
         let mut settings = MonitorSettings::default();
         settings.video_decode = settings::decode_path_from_config(layout.video_decode);
         settings.buffer.mode = settings::playout_mode_from_config(layout.playout_mode);
+        settings.output = layout.output.clone();
         worker.set_buffer(settings.buffer);
         worker.set_audio_boost_db(settings.audio_boost_db);
         worker.set_audio_volume_pct(settings.audio_volume_pct);
@@ -292,6 +322,22 @@ impl MonitorApp {
             stats_video_open: layout.stats_video_open,
             stats_audio_open: layout.stats_audio_open,
             stats_source_open: layout.stats_source_open,
+            displays: Vec::new(),
+            operator_display: None,
+            last_outer_rect: None,
+            displays_refreshed_at: Instant::now() - Duration::from_secs(10),
+            displays_dirty: true,
+            output_open: false,
+            pending_output_start: false,
+            output_monitor: None,
+            output_target: None,
+            output_error: None,
+            output_snapshot: Arc::new(parking_lot::Mutex::new(OutputSnapshot {
+                language,
+                ..Default::default()
+            })),
+            output_focus_reclaim: 0,
+            stall_state: StallState::Waiting,
             cpu_upload_pad: Vec::new(),
         };
         app.buffer_edit.sync_from(
@@ -695,7 +741,9 @@ impl MonitorApp {
         {
             let guard = self.worker.stall();
             let mut d = guard.lock();
-            self.stall_text = match d.tick() {
+            let state = d.tick();
+            self.stall_state = state;
+            self.stall_text = match state {
                 StallState::Waiting => t(self.language, "monitor.waiting").to_string(),
                 StallState::Live => "LIVE".into(),
                 StallState::Stalled => t(self.language, "monitor.stalled").to_string(),
@@ -892,12 +940,229 @@ impl MonitorApp {
         }
     }
 
+    /// Re-scan the displays attached to `frame`'s window.
+    fn refresh_displays(&mut self, frame: &eframe::Frame) {
+        self.displays_refreshed_at = Instant::now();
+        self.displays_dirty = false;
+        let Some(window) = frame.winit_window() else {
+            return;
+        };
+        let (displays, operator) = output::scan_displays(window);
+        self.displays = displays;
+        self.operator_display = operator;
+    }
+
+    /// Stop the output when its display disappears or becomes the operator
+    /// display, and follow the display when the OS reorders monitors.
+    fn revalidate_output_target(&mut self, ctx: &Context) {
+        let Some(target) = self.output_target.clone() else {
+            self.stop_output(ctx);
+            return;
+        };
+        let found = self
+            .displays
+            .iter()
+            .find(|display| match target.name.as_deref() {
+                Some(name) => display.name.as_deref() == Some(name),
+                None => display.index == target.index,
+            });
+        let Some(display) = found else {
+            self.fail_output(OutputError::Missing, ctx);
+            return;
+        };
+        if display.is_operator {
+            self.fail_output(OutputError::SameAsOperator, ctx);
+            return;
+        }
+        if display.index != target.index {
+            self.output_target = Some(OutputTarget {
+                index: display.index,
+                name: display.name.clone(),
+            });
+            self.output_monitor = Some(display.index);
+            ctx.request_repaint();
+        }
+    }
+
+    fn output_status(&self) -> OutputStatus {
+        match self.session_state {
+            SessionState::Stopped | SessionState::Stopping => OutputStatus::Idle,
+            SessionState::Connecting => OutputStatus::Connecting,
+            SessionState::Reconnecting => OutputStatus::Reconnecting,
+            SessionState::Connected => match self.stall_state {
+                StallState::Waiting => OutputStatus::Idle,
+                StallState::Live => OutputStatus::Live,
+                StallState::Stalled => OutputStatus::Stalled,
+            },
+        }
+    }
+
+    /// Start the output window. Returns `false` when no usable display exists.
+    fn start_output(&mut self, ctx: &Context) -> bool {
+        if self.output_open {
+            return true;
+        }
+        let resolved =
+            output::resolve_target(&self.displays, self.settings.output.display.as_ref());
+        let index = match resolved {
+            Ok(index) => index,
+            Err(error) => {
+                self.output_error = Some(error);
+                return false;
+            }
+        };
+        let name = self
+            .displays
+            .get(index)
+            .and_then(|display| display.name.clone());
+        self.output_target = Some(OutputTarget { index, name });
+        self.output_monitor = Some(index);
+        self.output_open = true;
+        self.output_error = None;
+        // Creating a borderless-fullscreen viewport can activate it on some
+        // platforms; pull the operator window back over the next few frames.
+        self.output_focus_reclaim = 3;
+        {
+            let mut snapshot = self.output_snapshot.lock();
+            snapshot.close_requested = false;
+            snapshot.video = None;
+        }
+        if self.settings.show_alpha {
+            // The alpha-mask diagnostic is baked into the shared frame texture,
+            // so it would leak into the clean feed.
+            self.settings.show_alpha = false;
+            self.prep_ctrl.set_alpha(false);
+        }
+        // Keep the controls above other windows while the clean feed is live,
+        // so the operator cannot be locked out by another app's window.
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::AlwaysOnTop,
+        ));
+        ctx.request_repaint();
+        true
+    }
+
+    fn stop_output(&mut self, ctx: &Context) {
+        self.output_open = false;
+        self.output_monitor = None;
+        self.output_target = None;
+        self.output_error = None;
+        // The destroyed fullscreen window can hand focus to another app.
+        self.output_focus_reclaim = 1;
+        {
+            let mut snapshot = self.output_snapshot.lock();
+            snapshot.close_requested = false;
+            snapshot.video = None;
+        }
+        // The output viewport hid the OS cursor while it was alive; make sure
+        // the operator window asks for it back.
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        // The operator window was kept on top while the clean feed ran.
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::Normal,
+        ));
+        ctx.request_repaint();
+    }
+
+    fn fail_output(&mut self, error: OutputError, ctx: &Context) {
+        self.stop_output(ctx);
+        self.output_error = Some(error);
+    }
+
+    fn toggle_output(&mut self, ctx: &Context) {
+        if self.output_open {
+            self.stop_output(ctx);
+            return;
+        }
+        // Defer the start until the end of the frame, after a fresh display
+        // scan: a just-moved operator window must not be selected as output.
+        self.pending_output_start = true;
+    }
+
+    /// Apply a new output display choice, moving a running output window.
+    fn set_output_display(&mut self, target: Option<OutputDisplayRef>, ctx: &Context) {
+        match output::resolve_target(&self.displays, target.as_ref()) {
+            Ok(index) => {
+                self.settings.output.display = target;
+                self.output_error = None;
+                self.persist_monitor_layout();
+                if self.output_open {
+                    let name = self
+                        .displays
+                        .get(index)
+                        .and_then(|display| display.name.clone());
+                    self.output_target = Some(OutputTarget { index, name });
+                    self.output_monitor = Some(index);
+                }
+                ctx.request_repaint();
+            }
+            Err(error) => {
+                self.output_error = Some(error);
+                self.displays_dirty = true;
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Keep the output viewport registered and its snapshot up to date.
+    fn sync_output(&mut self, ctx: &Context) {
+        if !self.output_open {
+            return;
+        }
+        let close_requested = self.output_snapshot.lock().take_close_request();
+        if close_requested {
+            self.stop_output(ctx);
+            return;
+        }
+
+        self.revalidate_output_target(ctx);
+        if !self.output_open {
+            return;
+        }
+        let Some(monitor) = self.output_monitor else {
+            self.stop_output(ctx);
+            return;
+        };
+
+        let status = self.output_status();
+        let status_text = status
+            .warning_key()
+            .map(|key| t(self.language, key))
+            .unwrap_or("");
+        {
+            let mut snapshot = self.output_snapshot.lock();
+            snapshot.video = self
+                .video_texture_id()
+                .filter(|_| self.frame_w > 0 && self.frame_h > 0)
+                .map(|texture| OutputVideo {
+                    texture,
+                    width: self.frame_w,
+                    height: self.frame_h,
+                });
+            snapshot.audio = self.audio_levels;
+            snapshot.status = status;
+            snapshot.status_text = status_text;
+            snapshot.language = self.language;
+            snapshot.overlays = self.settings.output.overlays;
+            snapshot.show_cursor = self.settings.output.show_cursor;
+        }
+
+        let title = t(self.language, "monitor.output_window_title").to_string();
+        let builder = output::viewport_builder(&title, monitor, self.settings.output.always_on_top);
+        let shared = Arc::clone(&self.output_snapshot);
+        ctx.show_viewport_deferred(output::viewport_id(), builder, move |ui, class| {
+            output::draw_viewport(ui, class, shared.as_ref());
+        });
+        ctx.request_repaint_of(output::viewport_id());
+    }
+
     fn audio_unavailable(&self) -> bool {
         matches!(self.worker.audio().status(), AudioOutputStatus::Unavailable)
     }
 
     fn open_preferences(&mut self) {
         self.preferences_open = true;
+        self.displays_dirty = true;
         self.audio_devices = list_output_devices();
         self.audio_output_device = self.worker.audio_output_device();
         self.audio_active_device = self.worker.audio().active_device_name();
@@ -999,6 +1264,44 @@ impl MonitorApp {
             }
             PrefsAction::SetSafeArea(v) => self.settings.safe_area = v,
             PrefsAction::SetVu(v) => self.settings.vu_meter = v,
+            PrefsAction::SetOutputEnabled(enabled) => {
+                if enabled {
+                    self.pending_output_start = true;
+                } else {
+                    self.stop_output(ctx);
+                }
+            }
+            PrefsAction::SetOutputDisplay(target) => self.set_output_display(target, ctx),
+            PrefsAction::SetOutputVu(v) => {
+                self.settings.output.overlays.vu = v;
+                self.persist_monitor_layout();
+            }
+            PrefsAction::SetOutputSafeArea(v) => {
+                self.settings.output.overlays.safe_area = v;
+                self.persist_monitor_layout();
+            }
+            PrefsAction::SetOutputTally(v) => {
+                self.settings.output.overlays.tally = v;
+                self.persist_monitor_layout();
+            }
+            PrefsAction::SetOutputWarnings(v) => {
+                self.settings.output.overlays.warnings = v;
+                self.persist_monitor_layout();
+            }
+            PrefsAction::SetOutputShowCursor(v) => {
+                self.settings.output.show_cursor = v;
+                self.persist_monitor_layout();
+                ctx.request_repaint();
+            }
+            PrefsAction::SetOutputAlwaysOnTop(v) => {
+                self.settings.output.always_on_top = v;
+                self.persist_monitor_layout();
+                ctx.request_repaint();
+            }
+            PrefsAction::RefreshDisplays => {
+                self.displays_dirty = true;
+                ctx.request_repaint();
+            }
             PrefsAction::EnterFullscreen => self.enter_fullscreen(ctx),
             PrefsAction::OpenHelp => {
                 ctx.open_url(egui::OpenUrl::new_tab(
@@ -1043,6 +1346,7 @@ impl MonitorApp {
             stats_source_open: self.stats_source_open,
             video_decode: settings::decode_path_to_config(self.settings.video_decode),
             playout_mode: settings::playout_mode_to_config(self.settings.buffer.mode),
+            output: self.settings.output.clone(),
         };
         let _ = save_studio_monitor_config(&cfg);
     }
@@ -1060,7 +1364,9 @@ impl eframe::App for MonitorApp {
         // Pause wgpu copies in the receive worker while occluded. The previous
         // 16ms hidden repaint still submitted GPU work with no present, which
         // wedged the shared device and made the OMT sockets flap (Reconnects).
-        self.worker.set_gpu_ingest(!hidden);
+        // Keep ingesting while the output window is visible, even if the
+        // operator window is minimized.
+        self.worker.set_gpu_ingest(!hidden || self.output_open);
         if became_visible {
             self.rebind_held_gpu_texture();
             ctx.request_repaint();
@@ -1068,16 +1374,33 @@ impl eframe::App for MonitorApp {
         self.last_got_frame = self.on_tick(ctx, !hidden);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let got_frame = self.last_got_frame;
 
+        // The operator display can change when the window is moved; refresh
+        // the display list promptly so the clean feed never targets the
+        // display that holds the controls.
+        let outer_rect = ctx.input(|i| i.viewport().outer_rect);
+        if outer_rect != self.last_outer_rect {
+            self.last_outer_rect = outer_rect;
+            self.displays_dirty = true;
+        }
+
+        // Displays are polled: winit 0.30 has no monitor hot-plug event.
+        if self.displays_dirty || self.displays_refreshed_at.elapsed() >= Duration::from_secs(2) {
+            self.refresh_displays(frame);
+        }
+
         // Escape / F11 fullscreen handling
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if esc_pressed {
             if self.preferences_open {
                 self.preferences_open = false;
             } else if self.fullscreen {
                 self.exit_fullscreen(&ctx);
+            } else if self.output_open {
+                self.stop_output(&ctx);
             }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
@@ -1086,6 +1409,9 @@ impl eframe::App for MonitorApp {
             } else {
                 self.enter_fullscreen(&ctx);
             }
+        }
+        if !self.preferences_open && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+            self.toggle_output(&ctx);
         }
 
         let chrome = self.chrome(&ctx);
@@ -1100,25 +1426,55 @@ impl eframe::App for MonitorApp {
         if self.preferences_open
             && let Some(action) = preferences::show(
                 &ctx,
-                self.language,
-                self.theme,
-                chrome,
-                &self.suite_version,
-                &self.settings,
-                &self.audio_devices,
-                self.audio_output_device.as_deref(),
-                self.audio_active_device.as_deref(),
-                self.audio_unavailable(),
-                self.worker.gpu_available(),
-                self.settings.buffer,
-                self.video_buffer_delay_ms,
-                self.audio_buffer_delay_ms,
-                self.buffer_fps().0,
-                self.buffer_fps().1,
+                preferences::PrefsContext {
+                    language: self.language,
+                    theme: self.theme,
+                    chrome,
+                    suite_version: &self.suite_version,
+                    settings: &self.settings,
+                    audio_devices: &self.audio_devices,
+                    selected_audio: self.audio_output_device.as_deref(),
+                    active_audio: self.audio_active_device.as_deref(),
+                    audio_unavailable: self.audio_unavailable(),
+                    gpu_available: self.worker.gpu_available(),
+                    buffer: self.settings.buffer,
+                    video_delay_ms: self.video_buffer_delay_ms,
+                    audio_delay_ms: self.audio_buffer_delay_ms,
+                    fps_n: self.buffer_fps().0,
+                    fps_d: self.buffer_fps().1,
+                    displays: &self.displays,
+                    operator_display: self.operator_display,
+                    output_running: self.output_open,
+                    output_monitor: self.output_monitor,
+                    output_error: self.output_error,
+                },
                 &mut self.buffer_edit,
             )
         {
             self.apply_prefs_action(action, &ctx);
+        }
+
+        // Keep the output viewport registered even while the operator window
+        // is minimized: eframe runs the root UI while a visible child exists.
+        self.sync_output(&ctx);
+
+        // A start request is resolved after a fresh display scan so a window
+        // moved in this frame cannot be selected as the output display.
+        if self.pending_output_start {
+            self.pending_output_start = false;
+            self.refresh_displays(frame);
+            if !self.start_output(&ctx) {
+                self.displays_dirty = true;
+                self.preferences_open = true;
+            }
+        }
+
+        // Reclaim the operator window after the clean feed viewport appears or
+        // disappears. `Focus` brings the root window to the front on desktop.
+        if self.output_focus_reclaim > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.output_focus_reclaim = self.output_focus_reclaim.saturating_sub(1);
+            ctx.request_repaint();
         }
 
         // New video already wakes the event loop from the prep thread.
@@ -1126,7 +1482,7 @@ impl eframe::App for MonitorApp {
         // 60 Hz even when the picture did not change, which starved other apps.
         if got_frame {
             ctx.request_repaint();
-        } else if self.preferences_open || connected || self.fullscreen {
+        } else if self.preferences_open || connected || self.fullscreen || self.output_open {
             ctx.request_repaint_after(Duration::from_millis(50));
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
