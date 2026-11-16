@@ -290,6 +290,98 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         (Language::English, "monitor.disconnect") => "Disconnect",
         (Language::Japanese, "monitor.disconnect") => "切断",
 
+        // Monitor program output
+        (Language::English, "monitor.output") => "Output",
+        (Language::Japanese, "monitor.output") => "出力",
+        (Language::English, "monitor.output_description") => {
+            "Send the picture borderless fullscreen to another display."
+        }
+        (Language::Japanese, "monitor.output_description") => {
+            "別のディスプレイへ枠なし全画面で映像を出力します。"
+        }
+        (Language::English, "monitor.output_display") => "Output display",
+        (Language::Japanese, "monitor.output_display") => "出力先ディスプレイ",
+        (Language::English, "monitor.output_send") => "Send to display",
+        (Language::Japanese, "monitor.output_send") => "ディスプレイへ出力",
+        (Language::English, "monitor.output_stop") => "Stop output",
+        (Language::Japanese, "monitor.output_stop") => "出力を停止",
+        (Language::English, "monitor.output_running") => "Output running",
+        (Language::Japanese, "monitor.output_running") => "出力中",
+        (Language::English, "monitor.output_auto") => "Automatic (other display)",
+        (Language::Japanese, "monitor.output_auto") => "自動（別のディスプレイ）",
+        (Language::English, "monitor.output_primary") => "Primary",
+        (Language::Japanese, "monitor.output_primary") => "メイン",
+        (Language::English, "monitor.output_here") => "This window",
+        (Language::Japanese, "monitor.output_here") => "このウィンドウ",
+        (Language::English, "monitor.output_refresh_displays") => "Refresh displays",
+        (Language::Japanese, "monitor.output_refresh_displays") => "ディスプレイを再検出",
+        (Language::English, "monitor.output_no_second_display") => {
+            "Connect a second display in extended mode."
+        }
+        (Language::Japanese, "monitor.output_no_second_display") => {
+            "セカンドディスプレイを拡張表示で接続してください。"
+        }
+        (Language::English, "monitor.output_same_display") => {
+            "Choose a display other than the one running Studio Monitor."
+        }
+        (Language::Japanese, "monitor.output_same_display") => {
+            "Studio Monitor を表示しているディスプレイ以外を選んでください。"
+        }
+        (Language::English, "monitor.output_missing_display") => {
+            "The selected display is no longer connected."
+        }
+        (Language::Japanese, "monitor.output_missing_display") => {
+            "選択したディスプレイが見つかりません。"
+        }
+        (Language::English, "monitor.output_operator_unknown") => {
+            "This platform does not report which display runs Studio Monitor. Choose a display manually."
+        }
+        (Language::Japanese, "monitor.output_operator_unknown") => {
+            "この環境では Studio Monitor を表示しているディスプレイを判別できません。出力先を手動で選んでください。"
+        }
+        (Language::English, "monitor.output_hint") => {
+            "The operator window stays here. The output opens borderless fullscreen on the selected display."
+        }
+        (Language::Japanese, "monitor.output_hint") => {
+            "操作画面はこのディスプレイのまま、選択したディスプレイに枠なし全画面で出力します。"
+        }
+        (Language::English, "monitor.output_clean_hint") => {
+            "Clean by default. Turn on only what the operator needs to see."
+        }
+        (Language::Japanese, "monitor.output_clean_hint") => {
+            "既定では映像のみです。演者に見せたいものだけオンにしてください。"
+        }
+        (Language::English, "monitor.output_overlays") => "Output overlays",
+        (Language::Japanese, "monitor.output_overlays") => "出力のオーバーレイ",
+        (Language::English, "monitor.output_tally") => "Tally border",
+        (Language::Japanese, "monitor.output_tally") => "タリー枠",
+        (Language::English, "monitor.output_warnings") => "Warnings",
+        (Language::Japanese, "monitor.output_warnings") => "警告表示",
+        (Language::English, "monitor.output_window_title") => "OMT Studio Monitor — Output",
+        (Language::Japanese, "monitor.output_window_title") => "OMT Studio Monitor — 出力",
+        (Language::English, "monitor.output_connecting") => "CONNECTING…",
+        (Language::Japanese, "monitor.output_connecting") => "接続中…",
+        (Language::English, "monitor.output_reconnecting") => "RECONNECTING",
+        (Language::Japanese, "monitor.output_reconnecting") => "再接続中",
+        (Language::English, "monitor.output_no_signal") => "NO SIGNAL",
+        (Language::Japanese, "monitor.output_no_signal") => "信号なし",
+        (Language::English, "monitor.output_pgm") => "PGM",
+        (Language::Japanese, "monitor.output_pgm") => "PGM",
+        (Language::English, "monitor.output_tooltip") => {
+            "Send the picture borderless fullscreen to another display (F9)."
+        }
+        (Language::Japanese, "monitor.output_tooltip") => {
+            "別のディスプレイへ枠なし全画面で映像を出力します（F9）"
+        }
+        (Language::English, "monitor.output_stop_tooltip") => "Stop the output window (F9).",
+        (Language::Japanese, "monitor.output_stop_tooltip") => "出力ウィンドウを閉じます（F9）",
+        (Language::English, "monitor.output_alpha_note") => {
+            "Alpha mask preview also changes the output picture, so it is turned off when output starts."
+        }
+        (Language::Japanese, "monitor.output_alpha_note") => {
+            "アルファマスク表示は出力映像にも反映されます。出力開始時にオフになります。"
+        }
+
         // Patterns
         (Language::English, "patterns.start") => "Start",
         (Language::Japanese, "patterns.start") => "開始",
@@ -552,6 +644,13 @@ mod tests {
             "tool.config_manager",
             "tool.discovery_server",
             "monitor.stalled",
+            "monitor.output",
+            "monitor.output_display",
+            "monitor.output_no_second_display",
+            "monitor.output_same_display",
+            "monitor.output_tally",
+            "monitor.output_warnings",
+            "monitor.output_window_title",
             "patterns.start",
             "patterns.restart_required",
             "patterns.name_in_use",

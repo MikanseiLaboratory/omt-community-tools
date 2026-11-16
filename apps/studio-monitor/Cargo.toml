@@ -20,3 +20,4 @@ egui.workspace = true
 omt-media.workspace = true
 parking_lot.workspace = true
 suite-core = { workspace = true, features = ["egui-fonts"] }
+winit.workspace = true

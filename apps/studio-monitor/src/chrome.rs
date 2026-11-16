@@ -24,6 +24,8 @@ pub struct UiChrome {
     pub accent: Color32,
     /// Soft accent wash behind selected rows.
     pub accent_soft: Color32,
+    /// Error / danger text.
+    pub danger: Color32,
 }
 
 impl UiChrome {
@@ -48,6 +50,7 @@ impl UiChrome {
             text_muted: rgb(0x8b9aab),
             accent: rgb(0x3d9cf0),
             accent_soft: rgb(0x1a3048),
+            danger: rgb(0xf46a6a),
         }
     }
 
@@ -62,6 +65,7 @@ impl UiChrome {
             text_muted: rgb(0x5c6b7a),
             accent: rgb(0x1f6feb),
             accent_soft: rgb(0xdbe8f8),
+            danger: rgb(0xc02b2b),
         }
     }
 

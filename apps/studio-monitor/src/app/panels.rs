@@ -1,14 +1,15 @@
 //! Windowed / fullscreen chrome panels and layout splitters.
 
 use eframe::egui::{self, Color32, Context, CursorIcon, Pos2, Rect, RichText, Sense, Ui, Vec2};
-use omt_media::{AudioLevels, BufferUnit, DiscoveredSource, PlayoutMode};
+use omt_media::{BufferUnit, DiscoveredSource, PlayoutMode};
 use suite_core::{Language, t};
 
 use super::{
-    ACTION_SAFE_FRAC, LAYOUT_GAP, LOG_MIN_H, MonitorApp, PREVIEW_MIN_W, SIDEBAR_MIN_W, STATS_MIN_W,
-    TITLE_SAFE_FRAC, TOOLBAR_H, clamp_log_h, clamp_sidebar_w, clamp_stats_w,
+    LAYOUT_GAP, LOG_MIN_H, MonitorApp, PREVIEW_MIN_W, SIDEBAR_MIN_W, STATS_MIN_W, TOOLBAR_H,
+    clamp_log_h, clamp_sidebar_w, clamp_stats_w,
 };
 use crate::chrome::UiChrome;
+use crate::overlay::{self, PREVIEW_VU};
 
 /// Fixed row height so the log ScrollArea only shapes on-screen lines.
 const LOG_ROW_H: f32 = 16.0;
@@ -209,12 +210,41 @@ impl MonitorApp {
                     if chip(ui, chrome, t(self.language, "monitor.zoom_reset"), false) {
                         self.zoom_reset();
                     }
+                    let output_label = if self.output_open {
+                        match self.output_monitor.and_then(|index| self.displays.get(index)) {
+                            Some(display) => format!(
+                                "{} · {}",
+                                t(self.language, "monitor.output"),
+                                display.short_label()
+                            ),
+                            None => t(self.language, "monitor.output").to_string(),
+                        }
+                    } else {
+                        t(self.language, "monitor.output").to_string()
+                    };
+                    let output_tooltip = if self.output_open {
+                        t(self.language, "monitor.output_stop_tooltip")
+                    } else if let Some(error) = self.output_error {
+                        error.message(self.language)
+                    } else {
+                        t(self.language, "monitor.output_tooltip")
+                    };
+                    if output_chip(
+                        ui,
+                        chrome,
+                        &output_label,
+                        self.output_open,
+                        output_tooltip,
+                        self.output_error.is_some() && !self.output_open,
+                    ) {
+                        self.toggle_output(ui.ctx());
+                    }
                     if chip(ui, chrome, t(self.language, "monitor.fullscreen"), false) {
                         self.enter_fullscreen(ui.ctx());
                     }
                     ui.label(
                         RichText::new(
-                            "wheel = zoom · middle-drag = pan · F11 / double-click = fullscreen",
+                            "wheel = zoom · middle-drag = pan · F11 / double-click = fullscreen · F9 = output",
                         )
                         .small()
                         .color(chrome.text_muted),
@@ -349,10 +379,16 @@ impl MonitorApp {
             Color32::WHITE,
         );
         if self.settings.safe_area {
-            paint_safe_area_clipped(ui, video_rect, clip);
+            overlay::paint_safe_area(ui.painter(), video_rect, clip);
         }
         if self.settings.vu_meter {
-            paint_vu_clipped(ui, video_rect, clip, self.audio_levels);
+            overlay::paint_vu(
+                ui.painter(),
+                video_rect,
+                clip,
+                self.audio_levels,
+                PREVIEW_VU,
+            );
         }
     }
 
@@ -730,6 +766,34 @@ fn chip(ui: &mut Ui, chrome: UiChrome, label: &str, active: bool) -> bool {
     .clicked()
 }
 
+fn output_chip(
+    ui: &mut Ui,
+    chrome: UiChrome,
+    label: &str,
+    active: bool,
+    tooltip: &str,
+    error: bool,
+) -> bool {
+    let fill = if active {
+        chrome.accent_soft
+    } else {
+        chrome.surface
+    };
+    let stroke = if active { chrome.accent } else { chrome.border };
+    let text = if error {
+        chrome.danger
+    } else if active {
+        chrome.accent
+    } else {
+        chrome.text
+    };
+    let button = egui::Button::new(RichText::new(label).color(text).size(12.0))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .corner_radius(4.0);
+    ui.add(button).on_hover_text(tooltip).clicked()
+}
+
 fn source_row(ui: &mut Ui, chrome: UiChrome, title: &str, subtitle: &str, selected: bool) -> bool {
     let fill = if selected {
         chrome.accent_soft
@@ -785,77 +849,6 @@ fn stat_row(ui: &mut Ui, chrome: UiChrome, label: &str, value: String) {
             ui.label(RichText::new(value).small().strong().color(chrome.text));
         });
     });
-}
-
-fn paint_safe_area_clipped(ui: &mut Ui, video_rect: Rect, clip: Rect) {
-    let painter = ui.painter().with_clip_rect(clip);
-    for (frac, color) in [
-        (ACTION_SAFE_FRAC, Color32::from_rgb(0xff, 0xff, 0xff)),
-        (TITLE_SAFE_FRAC, Color32::from_rgb(0xff, 0xeb, 0x3b)),
-    ] {
-        let w = video_rect.width() * frac;
-        let h = video_rect.height() * frac;
-        let r = Rect::from_center_size(video_rect.center(), Vec2::new(w, h));
-        painter.rect_stroke(
-            r,
-            0.0,
-            egui::Stroke::new(1.0, color),
-            egui::StrokeKind::Outside,
-        );
-    }
-}
-
-fn paint_vu_clipped(ui: &mut Ui, video_rect: Rect, clip: Rect, levels: AudioLevels) {
-    let painter = ui.painter().with_clip_rect(clip);
-    let bar_w = 10.0f32;
-    let gap = 4.0f32;
-    let height = video_rect.height() * 0.6;
-    let top = video_rect.min.y + (video_rect.height() - height) * 0.5;
-    let left = video_rect.max.x - bar_w * 2.0 - gap - 12.0;
-    let l = peak_to_meter(levels.peak_l);
-    let r = peak_to_meter(levels.peak_r);
-    paint_vu_bar_painter(&painter, Pos2::new(left, top), bar_w, height, l);
-    paint_vu_bar_painter(
-        &painter,
-        Pos2::new(left + bar_w + gap, top),
-        bar_w,
-        height,
-        r,
-    );
-}
-
-fn paint_vu_bar_painter(
-    painter: &egui::Painter,
-    origin: Pos2,
-    width: f32,
-    full_h: f32,
-    level: f32,
-) {
-    let bg = Rect::from_min_size(origin, Vec2::new(width, full_h));
-    painter.rect_filled(bg, 2.0, Color32::from_rgb(0x1b, 0x22, 0x2c));
-    let h = (full_h * level).max(2.0);
-    let db = -60.0 + level * 60.0;
-    let color = if db > -3.0 {
-        Color32::from_rgb(0xf4, 0x43, 0x36)
-    } else if db > -9.0 {
-        Color32::from_rgb(0xff, 0xeb, 0x3b)
-    } else {
-        Color32::from_rgb(0x4c, 0xaf, 0x50)
-    };
-    let fill = Rect::from_min_max(
-        Pos2::new(origin.x, origin.y + full_h - h),
-        Pos2::new(origin.x + width, origin.y + full_h),
-    );
-    painter.rect_filled(fill, 2.0, color);
-}
-
-fn peak_to_meter(peak: f32) -> f32 {
-    const FLOOR_DB: f32 = -60.0;
-    if peak <= 1e-6 {
-        return 0.0;
-    }
-    let db = (20.0 * peak.log10()).clamp(FLOOR_DB, 0.0);
-    ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
 }
 
 fn truncate_log_line(line: &str) -> &str {

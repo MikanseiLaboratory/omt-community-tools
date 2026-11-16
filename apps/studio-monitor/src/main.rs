@@ -6,6 +6,8 @@
 mod app;
 mod chrome;
 mod frame_prep;
+mod output;
+mod overlay;
 mod preferences;
 mod settings;
 

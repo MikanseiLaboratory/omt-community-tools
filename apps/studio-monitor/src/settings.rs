@@ -1,6 +1,7 @@
 //! Viewer settings shared across UI modules.
 
 use omt_media::{BufferSettings, Quality};
+use suite_core::OutputConfig;
 
 /// Receive quality preset (suggested encode quality + optional Preview).
 ///
@@ -42,6 +43,8 @@ pub struct MonitorSettings {
     pub audio_volume_pct: i32,
     /// Linked or independent A/V playout buffers (PTS gate).
     pub buffer: BufferSettings,
+    /// Program output display and overlay preferences.
+    pub output: OutputConfig,
 }
 
 impl Default for MonitorSettings {
@@ -55,6 +58,7 @@ impl Default for MonitorSettings {
             audio_boost_db: 0,
             audio_volume_pct: 100,
             buffer: BufferSettings::default(),
+            output: OutputConfig::default(),
         }
     }
 }

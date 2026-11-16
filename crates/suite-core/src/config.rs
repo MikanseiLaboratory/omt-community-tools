@@ -202,6 +202,47 @@ pub enum VideoDecodePath {
     Gpu,
 }
 
+/// Reference to a display chosen for Studio Monitor program output.
+///
+/// The `index` follows winit's `available_monitors()` order (the order the
+/// program-output viewport expects). The `name` is kept so the display can be
+/// found again when the OS reorders or adds monitors between runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputDisplayRef {
+    /// Zero-based index in `available_monitors()` order.
+    pub index: u32,
+    /// Monitor name reported by the OS, if known.
+    pub name: Option<String>,
+}
+
+/// Optional overlays drawn on the Studio Monitor program output.
+///
+/// Everything is off by default so the output stays a clean picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputOverlays {
+    /// Vertical audio level meter.
+    pub vu: bool,
+    /// Action / title safe guides.
+    pub safe_area: bool,
+    /// Program tally border and `PGM` badge.
+    pub tally: bool,
+    /// Connection / stall warning pill.
+    pub warnings: bool,
+}
+
+/// Studio Monitor program output preferences.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    /// Preferred output display. `None` picks the first display that is not
+    /// the one running Studio Monitor.
+    pub display: Option<OutputDisplayRef>,
+    /// Which overlays to draw on the output window.
+    pub overlays: OutputOverlays,
+}
+
 /// Studio Monitor tool preferences (`studio-monitor.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -232,6 +273,9 @@ pub struct StudioMonitorConfig {
     /// `synced` waits on timestamps. `immediate` presents packets on arrival.
     #[serde(default)]
     pub playout_mode: PlayoutMode,
+    /// Program output display and overlay preferences.
+    #[serde(default)]
+    pub output: OutputConfig,
 }
 
 impl Default for StudioMonitorConfig {
@@ -246,6 +290,7 @@ impl Default for StudioMonitorConfig {
             stats_source_open: true,
             video_decode: VideoDecodePath::Cpu,
             playout_mode: PlayoutMode::Synced,
+            output: OutputConfig::default(),
         }
     }
 }
@@ -500,6 +545,55 @@ mod tests {
         assert!(parsed.stats_source_open);
         assert_eq!(parsed.video_decode, VideoDecodePath::Cpu);
         assert_eq!(parsed.playout_mode, PlayoutMode::Synced);
+        assert_eq!(parsed.output, OutputConfig::default());
+        assert!(parsed.output.display.is_none());
+        assert!(!parsed.output.overlays.vu);
+        assert!(!parsed.output.overlays.safe_area);
+        assert!(!parsed.output.overlays.tally);
+        assert!(!parsed.output.overlays.warnings);
+    }
+
+    #[test]
+    fn roundtrip_studio_monitor_output() {
+        let cfg = StudioMonitorConfig {
+            output: OutputConfig {
+                display: Some(OutputDisplayRef {
+                    index: 1,
+                    name: Some(r"\\.\DISPLAY2".into()),
+                }),
+                overlays: OutputOverlays {
+                    vu: true,
+                    safe_area: true,
+                    tally: true,
+                    warnings: true,
+                },
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: StudioMonitorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.output, cfg.output);
+        assert_eq!(parsed.output.display.as_ref().unwrap().index, 1);
+        assert_eq!(
+            parsed.output.display.as_ref().unwrap().name.as_deref(),
+            Some(r"\\.\DISPLAY2")
+        );
+        assert!(parsed.output.overlays.vu);
+        assert!(parsed.output.overlays.warnings);
+    }
+
+    #[test]
+    fn legacy_studio_monitor_output_partial_json_defaults() {
+        // Only one overlay key present: the rest must default to off and the
+        // display must stay automatic.
+        let parsed: StudioMonitorConfig =
+            serde_json::from_str(r#"{"schema_version":1,"output":{"overlays":{"vu":true}}}"#)
+                .unwrap();
+        assert!(parsed.output.display.is_none());
+        assert!(parsed.output.overlays.vu);
+        assert!(!parsed.output.overlays.safe_area);
+        assert!(!parsed.output.overlays.tally);
+        assert!(!parsed.output.overlays.warnings);
     }
 
     #[test]
