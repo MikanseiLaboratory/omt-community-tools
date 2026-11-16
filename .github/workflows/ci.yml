@@ -52,7 +52,7 @@ jobs:
       - name: Clippy (workspace libs/tools)
         run: cargo clippy -p suite-core -p omt-media -p pattern-generator -p monitor-bench -p omt-studio-monitor -p omt-test-patterns -p omt-config-manager -p omt-discovery-server --all-targets -- -D warnings
       - name: Test
-        run: cargo test -p suite-core -p omt-media -p pattern-generator -p monitor-bench -p omt-config-manager -p omt-discovery-server
+        run: cargo test -p suite-core -p omt-media -p pattern-generator -p monitor-bench -p omt-config-manager -p omt-discovery-server -p omt-studio-monitor
 
   build-tools:
     strategy:
