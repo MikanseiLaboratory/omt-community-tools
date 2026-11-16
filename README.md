@@ -10,7 +10,7 @@ Open Media Transport production utilities for Windows, macOS, and Linux. This is
 [![CI](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-community-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-community-tools/releases/latest)
 
-<img src="docs/images/studio-monitor.png" alt="Studio Monitor" width="900">
+<img src="assets/screenshots/studio-monitor.png" alt="Studio Monitor" width="900">
 
 ## Download
 
@@ -40,7 +40,7 @@ Windows `.msi` / `-setup.exe` · macOS `.dmg` · Linux `.deb` / `.AppImage`
 - Native **Rust** tools built with **egui/eframe** + **wgpu**, with VMX and SIMD
 - **Tauri** launcher with Windows / macOS / Linux builds
 
-> **First launch:** macOS/Windows may show a security prompt (see [macOS notes](docs/macos-gatekeeper.md)); Linux needs Avahi for discovery and a Vulkan driver.
+> **First launch:** macOS/Windows may show a first-launch security prompt; Linux needs Avahi for discovery and a Vulkan driver.
 
 ## License
 
