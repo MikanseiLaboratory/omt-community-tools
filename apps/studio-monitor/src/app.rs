@@ -180,6 +180,9 @@ struct MonitorApp {
     output_target: Option<OutputTarget>,
     output_error: Option<OutputError>,
     output_snapshot: Arc<parking_lot::Mutex<OutputSnapshot>>,
+    /// Frames left to pull focus back to the operator window after the clean
+    /// feed is created or destroyed.
+    output_focus_reclaim: u8,
     /// Latest stall state, used by the output status overlay.
     stall_state: StallState,
     /// Row-padded staging for `queue.write_texture` (256-byte alignment).
@@ -327,6 +330,7 @@ impl MonitorApp {
                 language,
                 ..Default::default()
             })),
+            output_focus_reclaim: 0,
             stall_state: StallState::Waiting,
             cpu_upload_pad: Vec::new(),
         };
@@ -1009,6 +1013,9 @@ impl MonitorApp {
         self.output_monitor = Some(index);
         self.output_open = true;
         self.output_error = None;
+        // Creating a borderless-fullscreen viewport can activate it on some
+        // platforms; pull the operator window back over the next few frames.
+        self.output_focus_reclaim = 3;
         {
             let mut snapshot = self.output_snapshot.lock();
             snapshot.close_requested = false;
@@ -1029,6 +1036,8 @@ impl MonitorApp {
         self.output_monitor = None;
         self.output_target = None;
         self.output_error = None;
+        // The destroyed fullscreen window can hand focus to another app.
+        self.output_focus_reclaim = 1;
         {
             let mut snapshot = self.output_snapshot.lock();
             snapshot.close_requested = false;
@@ -1412,6 +1421,14 @@ impl eframe::App for MonitorApp {
         // Keep the output viewport registered even while the operator window
         // is minimized: eframe runs the root UI while a visible child exists.
         self.sync_output(&ctx);
+
+        // Reclaim the operator window after the clean feed viewport appears or
+        // disappears. `Focus` brings the root window to the front on desktop.
+        if self.output_focus_reclaim > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.output_focus_reclaim = self.output_focus_reclaim.saturating_sub(1);
+            ctx.request_repaint();
+        }
 
         // New video already wakes the event loop from the prep thread.
         // A 16 ms connected timer was tessellating the full CJK chrome at
