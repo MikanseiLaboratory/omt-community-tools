@@ -1,102 +1,47 @@
-# OMT Community Tools
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/branding/omt-community-tools-logo-on-dark.svg">
   <img alt="OMT Community Tools" src="assets/branding/omt-community-tools-logo-on-light.svg" width="720">
 </picture>
 
+# OMT Community Tools
+
+Open Media Transport production utilities for Windows, macOS, and Linux. This is an independent community project and is not affiliated with StudioCoast Pty Ltd or vMix.
+
 [![CI](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/omt-community-tools/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/MikanseiLaboratory/omt-community-tools?label=Latest%20release)](https://github.com/MikanseiLaboratory/omt-community-tools/releases/latest)
 
-Open Media Transport production utilities made by [MikanseiLaboratory](https://github.com/MikanseiLaboratory). This is an independent community project and is not affiliated with StudioCoast Pty Ltd or vMix.
+<img src="docs/images/studio-monitor.png" alt="Studio Monitor" width="900">
 
+## Download
 
+**[Download the latest release](https://github.com/MikanseiLaboratory/omt-community-tools/releases/latest)**
 
-## Suite contents
+Windows `.msi` / `-setup.exe` · macOS `.dmg` · Linux `.deb` / `.AppImage`
+
+## Tools
 
 | Tool | Description |
 |------|-------------|
-| Studio Monitor | Discover and view OMT sources on the LAN |
-| Test Patterns | Send SMPTE-style patterns + tone over OMT |
-| Config Manager | View and edit the global OMT `settings.xml` |
-| Discovery Server | GUI + CLI TCP discovery server (port 6399) |
+| Studio Monitor | Discover and view OMT sources. Press `F9` to send a clean feed to a second display. |
+| Test Patterns | Send SMPTE-style patterns and tone over OMT. |
+| Config Manager | View and edit the global OMT `settings.xml`. |
+| Discovery Server | GUI + CLI TCP discovery server (port 6399). |
 
-Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Settings Manager): [vMix Desktop Capture](https://www.vmix.com/software/vmix-desktop-capture.aspx)
+## Quick start
 
-### Studio Monitor clean feed output
+1. Install and open **OMT Tools**.
+2. **Studio Monitor** — pick a source from the list. `F9` opens a clean feed (video only) on another display; configure the display, cursor, and overlays in **Preferences → Clean feed output**.
+3. **Test Patterns** — choose a pattern and press **Start** to publish a test source.
+4. **Config Manager / Discovery Server** — open them from the launcher.
 
-Studio Monitor can send a **clean feed** — the picture with no operator UI — borderless fullscreen to a second display while the controls stay on the operator's screen. This is useful for a presenter/return monitor or a projector that should not show the application UI. Choose the display in **Preferences → Clean feed output**; the choice and overlay settings are remembered. The clean feed is picture-only by default (black letterboxing); VU meter, safe areas, tally border, and connection warnings are opt-in clean feed overlays in the same section. Cursor visibility and always-on-top behavior are configurable there too. Press `F9` to start or stop the clean feed without opening Preferences.
+## Core technology
 
-### Test Patterns source names
+- **OMT (Open Media Transport)** over the LAN with mDNS discovery
+- Native **Rust** tools built with **egui/eframe** + **wgpu**, with VMX and SIMD
+- **Tauri** launcher with Windows / macOS / Linux builds
 
-Test Patterns advertises the exact source name you enter. It never renames a source automatically, because receivers (vMix, Studio Monitor, …) reconnect by the advertised name: silently moving `Test Pattern (2)` between processes makes a receiver show the wrong feed.
-
-If another **live** source on the same machine already uses the name, Test Patterns refuses to start and asks you to choose another one. To run multiple instances on one machine, give each instance its own name:
-
-```bash
-omt-test-patterns --name "Test Pattern 2"
-```
-
-`--name` applies to that process only and is not written back to the shared `test-patterns.json`.
-
-## Prerequisites
-
-- Rust **1.97+** (edition 2024)
-- Bun 1.2+ (launcher frontend)
-
-## Build Targets
-
-- Windows x64 (`x86_64-pc-windows-msvc`)
-- Windows Arm64 (`aarch64-pc-windows-msvc`)
-- macOS Intel (`x86_64-apple-darwin`)
-- macOS Apple Silicon (`aarch64-apple-darwin`)
-- Linux x64 (`x86_64-unknown-linux-gnu`)
-- Linux Arm64 (`aarch64-unknown-linux-gnu`)
-
-## macOS notes
-
-macOS builds are code signed in CI. Without an Apple Developer certificate the release workflow ad-hoc signs the app (`APPLE_SIGNING_IDENTITY=-`). Ad-hoc signing is required on Apple Silicon: the linker already ad-hoc signs every arm64 Mach-O, so an app bundle that is not itself signed looks like it has a broken signature (`code has no resources but signature indicates they must be present`). Gatekeeper then reports "OMT Tools is damaged and can't be opened" and never starts the process.
-
-Ad-hoc signing still does not notarize the build, so on first launch macOS asks you to allow it. Open **System Settings → Privacy & Security** and click **Open Anyway** (on older macOS versions, Control-click the app and choose **Open**).
-
-When building a macOS release locally, use `bun run build:macos`. It builds the sidecars, stages them, and signs the app; set `TAURI_TARGET=x86_64-apple-darwin` for an Intel build. A plain `bun run tauri build` leaves the `.app` unsigned and reproduces the Gatekeeper failure above.
-
-To ship a build that opens without that prompt, add these repository secrets; Tauri then signs with the Developer ID certificate and notarizes automatically:
-
-- `APPLE_CERTIFICATE` — base64-encoded Developer ID Application `.p12`
-- `APPLE_CERTIFICATE_PASSWORD` — password for the `.p12`
-- `APPLE_SIGNING_IDENTITY` — certificate name from `security find-identity -v -p codesigning`
-- `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID` — notarization credentials
-
-Releases published before this was configured (v0.1.5 and earlier) contain no bundle signature. If you trust the download and macOS says the app is damaged, remove the quarantine flag once and open it normally:
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/OMT Tools.app"
-```
-
-For a step-by-step walkthrough with screenshots of both dialogs, see [docs/macos-gatekeeper.md](docs/macos-gatekeeper.md).
-
-## Windows notes
-
-The `.msi` and `-setup.exe` installers are not Authenticode-signed yet, so SmartScreen may warn that the publisher is unknown. Choose **More info → Run anyway**. Signing requires a Windows code-signing certificate.
-
-## Linux notes
-
-Linux builds ship as `.deb`, `.rpm`, and AppImage.
-
-The `.deb` installs `/usr/bin/omt-launcher` and the tool binaries in `/usr/bin` (`omt-studio-monitor`, `omt-test-patterns`, `omt-config-manager`, `omt-discovery-server`, `omt-discovery-server-gui`), plus a menu entry "OMT Tools". The AppImage bundles its own WebKitGTK and runs with `GDK_BACKEND=x11` (X11/XWayland). The AppImage forces `GDK_BACKEND=x11`, so on Wayland it requires XWayland (verified: on a pure Wayland session without XWayland it fails with "Failed to initialize GTK"); on Wayland desktops such as Raspberry Pi OS (which ship XWayland) it works, and the `.deb` runs natively on Wayland.
-
-### Runtime requirements
-
-- Avahi (mDNS) must be running for OMT source discovery. Install it with `sudo apt install avahi-daemon` and make sure the daemon is running. Without it, discovery does not work and the OBS OMT plugin can crash.
-- Studio Monitor and Test Patterns need a Vulkan driver (wgpu). On a machine without a GPU driver (a VM or a headless box), install Mesa's software Vulkan driver: `sudo apt install mesa-vulkan-drivers` (lavapipe). Without it they fail with `NoSupportedDeviceFound`. Software rendering works, but the display frame rate will be low.
-
-### WebKitGTK
-
-On Linux the launcher sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` at startup. That fixes a scrambled launcher window on Raspberry Pi OS. It applies to every install method, because the workaround is in the launcher binary. The launcher sets each variable only when it is unset, so a value you set yourself wins, including `0` (for example in `/etc/environment`). Set them to `0` to opt out. Child processes started by the launcher inherit these variables.
+> **First launch:** macOS/Windows may show a security prompt (see [macOS notes](docs/macos-gatekeeper.md)); Linux needs Avahi for discovery and a Vulkan driver.
 
 ## License
 
-[PolyForm Shield 1.0.0](https://polyformproject.org/licenses/shield/1.0.0)
-
-Source-available. You may use, modify, and distribute this software for any purpose except providing a product that competes with this software or with products MikanseiLaboratory provides using it. See [LICENSE](LICENSE) for the full terms.
+[PolyForm Shield 1.0.0](LICENSE) — source-available; see the license for terms.
