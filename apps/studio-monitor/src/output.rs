@@ -1,4 +1,4 @@
-//! Program output window: display discovery, target resolution, and drawing.
+//! Clean feed output window: display discovery, target resolution, and drawing.
 //!
 //! The output is a second egui viewport that covers one display in borderless
 //! fullscreen. The operator window keeps the controls; this module only knows

@@ -117,11 +117,11 @@ pub struct PrefsContext<'a> {
     pub displays: &'a [DisplayInfo],
     /// Display currently holding the operator window, if known.
     pub operator_display: Option<usize>,
-    /// Whether the program output window is running.
+    /// Whether the clean feed window is running.
     pub output_running: bool,
     /// Display index the output is running on.
     pub output_monitor: Option<usize>,
-    /// Last output start error.
+    /// Last clean feed start error.
     pub output_error: Option<OutputError>,
 }
 
@@ -306,10 +306,10 @@ pub fn show(
                         action = Some(PrefsAction::SetVu(!settings.vu_meter));
                     }
 
-                    // —— Program output ——
+                    // —— Clean feed output ——
                     ui.add_space(12.0);
                     ui.separator();
-                    section_title(ui, chrome, t(language, "monitor.output"));
+                    section_title(ui, chrome, t(language, "monitor.output_section"));
                     ui.label(
                         RichText::new(t(language, "monitor.output_description"))
                             .small()

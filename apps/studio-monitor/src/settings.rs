@@ -43,7 +43,7 @@ pub struct MonitorSettings {
     pub audio_volume_pct: i32,
     /// Linked or independent A/V playout buffers (PTS gate).
     pub buffer: BufferSettings,
-    /// Program output display and overlay preferences.
+    /// Clean feed output display and overlay preferences.
     pub output: OutputConfig,
 }
 

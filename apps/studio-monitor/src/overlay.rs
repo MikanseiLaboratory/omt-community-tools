@@ -1,4 +1,4 @@
-//! Picture overlays shared by the operator preview and the program output.
+//! Picture overlays shared by the operator preview and the clean feed output.
 //!
 //! The preview draws compact guides; the output window draws the same guides
 //! larger. Keeping the geometry and colours here stops the two views from

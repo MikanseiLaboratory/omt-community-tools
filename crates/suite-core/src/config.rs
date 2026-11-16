@@ -202,10 +202,10 @@ pub enum VideoDecodePath {
     Gpu,
 }
 
-/// Reference to a display chosen for Studio Monitor program output.
+/// Reference to a display chosen for the Studio Monitor clean feed output.
 ///
 /// The `index` follows winit's `available_monitors()` order (the order the
-/// program-output viewport expects). The `name` is kept so the display can be
+/// clean-feed viewport expects). The `name` is kept so the display can be
 /// found again when the OS reorders or adds monitors between runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -216,7 +216,7 @@ pub struct OutputDisplayRef {
     pub name: Option<String>,
 }
 
-/// Optional overlays drawn on the Studio Monitor program output.
+/// Optional overlays drawn on the Studio Monitor clean feed output.
 ///
 /// Everything is off by default so the output stays a clean picture.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +232,7 @@ pub struct OutputOverlays {
     pub warnings: bool,
 }
 
-/// Studio Monitor program output preferences.
+/// Studio Monitor clean feed output preferences.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
@@ -273,7 +273,7 @@ pub struct StudioMonitorConfig {
     /// `synced` waits on timestamps. `immediate` presents packets on arrival.
     #[serde(default)]
     pub playout_mode: PlayoutMode,
-    /// Program output display and overlay preferences.
+    /// Clean feed output display and overlay preferences.
     #[serde(default)]
     pub output: OutputConfig,
 }

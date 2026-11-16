@@ -244,7 +244,7 @@ impl MonitorApp {
                     }
                     ui.label(
                         RichText::new(
-                            "wheel = zoom · middle-drag = pan · F11 / double-click = fullscreen · F9 = output",
+                            "wheel = zoom · middle-drag = pan · F11 / double-click = fullscreen · F9 = clean feed",
                         )
                         .small()
                         .color(chrome.text_muted),

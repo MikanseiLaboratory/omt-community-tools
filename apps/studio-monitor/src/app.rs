@@ -172,7 +172,7 @@ struct MonitorApp {
     operator_display: Option<usize>,
     displays_refreshed_at: Instant,
     displays_dirty: bool,
-    /// Whether the program-output viewport should be shown.
+    /// Whether the clean-feed viewport should be shown.
     output_open: bool,
     /// Resolved display index for the output window.
     output_monitor: Option<usize>,
@@ -186,7 +186,7 @@ struct MonitorApp {
     cpu_upload_pad: Vec<u8>,
 }
 
-/// Display the program output was started on.
+/// Display the clean feed was started on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OutputTarget {
     index: usize,
@@ -1016,7 +1016,7 @@ impl MonitorApp {
         }
         if self.settings.show_alpha {
             // The alpha-mask diagnostic is baked into the shared frame texture,
-            // so it would leak into the program output.
+            // so it would leak into the clean feed.
             self.settings.show_alpha = false;
             self.prep_ctrl.set_alpha(false);
         }
