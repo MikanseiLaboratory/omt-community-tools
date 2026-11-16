@@ -23,6 +23,10 @@ Open Media Transport production utilities made by [MikanseiLaboratory](https://g
 
 Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Settings Manager): [vMix Desktop Capture](https://www.vmix.com/software/vmix-desktop-capture.aspx)
 
+### Studio Monitor output display
+
+Studio Monitor can send the picture borderless fullscreen to a second display while the controls stay on the operator's screen — useful for a presenter/return monitor or a projector that should not show the application UI. Choose the display in **Preferences → Output**; the choice and the overlay settings are remembered. The output is clean by default (video only, black letterboxing); VU meter, safe areas, tally border, and connection warnings are opt-in overlays in the same section. Press `F9` to start or stop the output without opening Preferences.
+
 ### Test Patterns source names
 
 Test Patterns advertises the exact source name you enter. It never renames a source automatically, because receivers (vMix, Studio Monitor, …) reconnect by the advertised name: silently moving `Test Pattern (2)` between processes makes a receiver show the wrong feed.
