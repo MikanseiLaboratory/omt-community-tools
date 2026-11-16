@@ -71,6 +71,8 @@ pub enum PrefsAction {
     SetOutputSafeArea(bool),
     SetOutputTally(bool),
     SetOutputWarnings(bool),
+    SetOutputShowCursor(bool),
+    SetOutputAlwaysOnTop(bool),
     RefreshDisplays,
     EnterFullscreen,
     OpenHelp,
@@ -459,6 +461,34 @@ pub fn show(
                                 .color(chrome.text_muted),
                         );
                     }
+
+                    ui.add_space(12.0);
+                    section_title(ui, chrome, t(language, "monitor.output_window"));
+                    if toggle_row(
+                        ui,
+                        chrome,
+                        t(language, "monitor.output_show_cursor"),
+                        settings.output.show_cursor,
+                    ) {
+                        action = Some(PrefsAction::SetOutputShowCursor(
+                            !settings.output.show_cursor,
+                        ));
+                    }
+                    if toggle_row(
+                        ui,
+                        chrome,
+                        t(language, "monitor.output_always_on_top"),
+                        settings.output.always_on_top,
+                    ) {
+                        action = Some(PrefsAction::SetOutputAlwaysOnTop(
+                            !settings.output.always_on_top,
+                        ));
+                    }
+                    ui.label(
+                        RichText::new(t(language, "monitor.output_window_hint"))
+                            .small()
+                            .color(chrome.text_muted),
+                    );
 
                     ui.add_space(12.0);
                     section_title(ui, chrome, t(language, "monitor.output_overlays"));

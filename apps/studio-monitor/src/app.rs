@@ -1129,10 +1129,11 @@ impl MonitorApp {
             snapshot.status_text = status_text;
             snapshot.language = self.language;
             snapshot.overlays = self.settings.output.overlays;
+            snapshot.show_cursor = self.settings.output.show_cursor;
         }
 
         let title = t(self.language, "monitor.output_window_title").to_string();
-        let builder = output::viewport_builder(&title, monitor);
+        let builder = output::viewport_builder(&title, monitor, self.settings.output.always_on_top);
         let shared = Arc::clone(&self.output_snapshot);
         ctx.show_viewport_deferred(output::viewport_id(), builder, move |ui, class| {
             output::draw_viewport(ui, class, shared.as_ref());
@@ -1273,6 +1274,16 @@ impl MonitorApp {
             PrefsAction::SetOutputWarnings(v) => {
                 self.settings.output.overlays.warnings = v;
                 self.persist_monitor_layout();
+            }
+            PrefsAction::SetOutputShowCursor(v) => {
+                self.settings.output.show_cursor = v;
+                self.persist_monitor_layout();
+                ctx.request_repaint();
+            }
+            PrefsAction::SetOutputAlwaysOnTop(v) => {
+                self.settings.output.always_on_top = v;
+                self.persist_monitor_layout();
+                ctx.request_repaint();
             }
             PrefsAction::RefreshDisplays => {
                 self.displays_dirty = true;

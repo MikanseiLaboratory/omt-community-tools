@@ -231,6 +231,8 @@ pub(crate) struct OutputSnapshot {
     pub language: Language,
     /// Overlay toggles for this output.
     pub overlays: OutputOverlays,
+    /// Draw the mouse cursor on the clean feed window.
+    pub show_cursor: bool,
     /// Set by the output viewport (Esc / F9 / close) and consumed by the app.
     pub close_requested: bool,
 }
@@ -247,8 +249,17 @@ pub(crate) fn viewport_id() -> ViewportId {
     ViewportId::from_hash_of("omt-studio-monitor-output")
 }
 
-/// Viewport attributes for the output window.
-pub(crate) fn viewport_builder(title: &str, monitor: usize) -> ViewportBuilder {
+/// Viewport attributes for the clean feed window.
+pub(crate) fn viewport_builder(
+    title: &str,
+    monitor: usize,
+    always_on_top: bool,
+) -> ViewportBuilder {
+    let level = if always_on_top {
+        WindowLevel::AlwaysOnTop
+    } else {
+        WindowLevel::Normal
+    };
     ViewportBuilder::default()
         .with_title(title)
         .with_monitor(monitor)
@@ -257,7 +268,7 @@ pub(crate) fn viewport_builder(title: &str, monitor: usize) -> ViewportBuilder {
         .with_active(false)
         .with_taskbar(false)
         .with_has_shadow(false)
-        .with_window_level(WindowLevel::AlwaysOnTop)
+        .with_window_level(level)
 }
 
 /// Draw the output viewport.
@@ -271,7 +282,7 @@ pub(crate) fn draw_viewport(ui: &mut Ui, class: ViewportClass, shared: &Mutex<Ou
     if class == ViewportClass::Deferred {
         // Idempotent in winit: the OS cursor is only touched when the flag
         // changes.
-        ctx.send_viewport_cmd(ViewportCommand::CursorVisible(false));
+        ctx.send_viewport_cmd(ViewportCommand::CursorVisible(snapshot.show_cursor));
         let close = ctx.input(|input| {
             input.key_pressed(egui::Key::Escape)
                 || input.key_pressed(egui::Key::F9)
@@ -611,6 +622,7 @@ mod tests {
                 tally: true,
                 warnings: true,
             },
+            show_cursor: false,
             close_requested: false,
         };
         let ctx = egui::Context::default();

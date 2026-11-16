@@ -355,6 +355,18 @@ pub fn t(lang: Language, key: &str) -> &'static str {
         }
         (Language::English, "monitor.output_overlays") => "Clean feed overlays",
         (Language::Japanese, "monitor.output_overlays") => "クリーンフィードのオーバーレイ",
+        (Language::English, "monitor.output_window") => "Clean feed window",
+        (Language::Japanese, "monitor.output_window") => "クリーンフィードのウィンドウ",
+        (Language::English, "monitor.output_show_cursor") => "Show cursor",
+        (Language::Japanese, "monitor.output_show_cursor") => "カーソルを表示",
+        (Language::English, "monitor.output_always_on_top") => "Always on top",
+        (Language::Japanese, "monitor.output_always_on_top") => "常に最前面",
+        (Language::English, "monitor.output_window_hint") => {
+            "Show the mouse pointer on the clean feed and keep the window above other apps."
+        }
+        (Language::Japanese, "monitor.output_window_hint") => {
+            "クリーンフィード上にマウスカーソルを表示し、他のウィンドウより前面に保ちます。"
+        }
         (Language::English, "monitor.output_tally") => "Tally border",
         (Language::Japanese, "monitor.output_tally") => "タリー枠",
         (Language::English, "monitor.output_warnings") => "Warnings",
@@ -655,6 +667,9 @@ mod tests {
             "monitor.output_same_display",
             "monitor.output_tally",
             "monitor.output_warnings",
+            "monitor.output_window",
+            "monitor.output_show_cursor",
+            "monitor.output_always_on_top",
             "monitor.output_window_title",
             "patterns.start",
             "patterns.restart_required",

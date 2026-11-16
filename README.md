@@ -25,7 +25,7 @@ Official vMix OMT tools for Windows (Desktop Capture, Viewer, Matrix Router, Set
 
 ### Studio Monitor clean feed output
 
-Studio Monitor can send a **clean feed** — the picture with no operator UI — borderless fullscreen to a second display while the controls stay on the operator's screen. This is useful for a presenter/return monitor or a projector that should not show the application UI. Choose the display in **Preferences → Clean feed output**; the choice and overlay settings are remembered. The clean feed is picture-only by default (black letterboxing); VU meter, safe areas, tally border, and connection warnings are opt-in clean feed overlays in the same section. Press `F9` to start or stop the clean feed without opening Preferences.
+Studio Monitor can send a **clean feed** — the picture with no operator UI — borderless fullscreen to a second display while the controls stay on the operator's screen. This is useful for a presenter/return monitor or a projector that should not show the application UI. Choose the display in **Preferences → Clean feed output**; the choice and overlay settings are remembered. The clean feed is picture-only by default (black letterboxing); VU meter, safe areas, tally border, and connection warnings are opt-in clean feed overlays in the same section. Cursor visibility and always-on-top behavior are configurable there too. Press `F9` to start or stop the clean feed without opening Preferences.
 
 ### Test Patterns source names
 

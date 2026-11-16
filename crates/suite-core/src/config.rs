@@ -233,7 +233,7 @@ pub struct OutputOverlays {
 }
 
 /// Studio Monitor clean feed output preferences.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
     /// Preferred output display. `None` picks the first display that is not
@@ -241,6 +241,21 @@ pub struct OutputConfig {
     pub display: Option<OutputDisplayRef>,
     /// Which overlays to draw on the output window.
     pub overlays: OutputOverlays,
+    /// Draw the mouse cursor on the clean feed window.
+    pub show_cursor: bool,
+    /// Keep the clean feed window above other windows.
+    pub always_on_top: bool,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            display: None,
+            overlays: OutputOverlays::default(),
+            show_cursor: false,
+            always_on_top: true,
+        }
+    }
 }
 
 /// Studio Monitor tool preferences (`studio-monitor.json`).
@@ -551,6 +566,8 @@ mod tests {
         assert!(!parsed.output.overlays.safe_area);
         assert!(!parsed.output.overlays.tally);
         assert!(!parsed.output.overlays.warnings);
+        assert!(!parsed.output.show_cursor);
+        assert!(parsed.output.always_on_top);
     }
 
     #[test]
@@ -567,6 +584,8 @@ mod tests {
                     tally: true,
                     warnings: true,
                 },
+                show_cursor: true,
+                always_on_top: false,
             },
             ..Default::default()
         };
@@ -580,20 +599,25 @@ mod tests {
         );
         assert!(parsed.output.overlays.vu);
         assert!(parsed.output.overlays.warnings);
+        assert!(parsed.output.show_cursor);
+        assert!(!parsed.output.always_on_top);
     }
 
     #[test]
     fn legacy_studio_monitor_output_partial_json_defaults() {
-        // Only one overlay key present: the rest must default to off and the
-        // display must stay automatic.
-        let parsed: StudioMonitorConfig =
-            serde_json::from_str(r#"{"schema_version":1,"output":{"overlays":{"vu":true}}}"#)
-                .unwrap();
+        // Only some keys present: the rest must fall back to the defaults
+        // (automatic display, cursor hidden, always on top).
+        let parsed: StudioMonitorConfig = serde_json::from_str(
+            r#"{"schema_version":1,"output":{"overlays":{"vu":true},"show_cursor":true}}"#,
+        )
+        .unwrap();
         assert!(parsed.output.display.is_none());
         assert!(parsed.output.overlays.vu);
         assert!(!parsed.output.overlays.safe_area);
         assert!(!parsed.output.overlays.tally);
         assert!(!parsed.output.overlays.warnings);
+        assert!(parsed.output.show_cursor);
+        assert!(parsed.output.always_on_top);
     }
 
     #[test]
