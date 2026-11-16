@@ -289,25 +289,6 @@ pub fn show(
                         );
                     }
 
-                    ui.add_space(12.0);
-                    section_title(ui, chrome, t(language, "monitor.overlay"));
-                    if toggle_row(
-                        ui,
-                        chrome,
-                        t(language, "monitor.safe_area"),
-                        settings.safe_area,
-                    ) {
-                        action = Some(PrefsAction::SetSafeArea(!settings.safe_area));
-                    }
-                    if toggle_row(
-                        ui,
-                        chrome,
-                        t(language, "monitor.vu_meter"),
-                        settings.vu_meter,
-                    ) {
-                        action = Some(PrefsAction::SetVu(!settings.vu_meter));
-                    }
-
                     // —— Clean feed output ——
                     ui.add_space(12.0);
                     ui.separator();
@@ -533,6 +514,25 @@ pub fn show(
                             .small()
                             .color(chrome.text_muted),
                     );
+
+                    ui.add_space(12.0);
+                    section_title(ui, chrome, t(language, "monitor.overlay"));
+                    if toggle_row(
+                        ui,
+                        chrome,
+                        t(language, "monitor.safe_area"),
+                        settings.safe_area,
+                    ) {
+                        action = Some(PrefsAction::SetSafeArea(!settings.safe_area));
+                    }
+                    if toggle_row(
+                        ui,
+                        chrome,
+                        t(language, "monitor.vu_meter"),
+                        settings.vu_meter,
+                    ) {
+                        action = Some(PrefsAction::SetVu(!settings.vu_meter));
+                    }
 
                     ui.add_space(12.0);
                     section_title(ui, chrome, t(language, "monitor.audio"));
