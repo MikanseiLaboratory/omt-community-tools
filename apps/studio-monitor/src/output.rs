@@ -217,7 +217,7 @@ impl OutputStatus {
 }
 
 /// Everything the deferred viewport callback needs to draw one frame.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct OutputSnapshot {
     /// Current video texture, if any.
     pub video: Option<OutputVideo>,
@@ -277,7 +277,8 @@ pub(crate) fn viewport_builder(
 /// content area as its `ui`.
 pub(crate) fn draw_viewport(ui: &mut Ui, class: ViewportClass, shared: &Mutex<OutputSnapshot>) {
     let ctx = ui.ctx().clone();
-    let mut snapshot = shared.lock();
+    // Copy the snapshot so no lock is held while egui runs the pass.
+    let snapshot = *shared.lock();
 
     if class == ViewportClass::Deferred {
         // Idempotent in winit: the OS cursor is only touched when the flag
@@ -286,10 +287,15 @@ pub(crate) fn draw_viewport(ui: &mut Ui, class: ViewportClass, shared: &Mutex<Ou
         let close = ctx.input(|input| {
             input.key_pressed(egui::Key::Escape)
                 || input.key_pressed(egui::Key::F9)
+                || input.pointer.button_clicked(egui::PointerButton::Primary)
+                || input.pointer.button_clicked(egui::PointerButton::Secondary)
                 || input.viewport().close_requested()
         });
         if close {
-            snapshot.close_requested = true;
+            // Hide immediately so a click on a fullscreen clean feed always
+            // reveals the operator window, even if the root pass is lagging.
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            shared.lock().close_requested = true;
             ctx.request_repaint_of(ViewportId::ROOT);
         }
     }
@@ -306,7 +312,7 @@ pub(crate) fn draw_viewport(ui: &mut Ui, class: ViewportClass, shared: &Mutex<Ou
             .default_size(Vec2::new(1280.0, 720.0))
             .show(&ctx, |ui| draw_contents(ui, &snapshot));
         if !open {
-            snapshot.close_requested = true;
+            shared.lock().close_requested = true;
             ctx.request_repaint_of(ViewportId::ROOT);
         }
         return;

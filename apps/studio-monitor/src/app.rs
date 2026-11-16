@@ -170,6 +170,8 @@ struct MonitorApp {
     displays: Vec<DisplayInfo>,
     /// Index of the display that currently holds the operator window.
     operator_display: Option<usize>,
+    /// Last known window rectangle, used to refresh displays after a move.
+    last_outer_rect: Option<egui::Rect>,
     displays_refreshed_at: Instant,
     displays_dirty: bool,
     /// Whether the clean-feed viewport should be shown.
@@ -320,6 +322,7 @@ impl MonitorApp {
             stats_source_open: layout.stats_source_open,
             displays: Vec::new(),
             operator_display: None,
+            last_outer_rect: None,
             displays_refreshed_at: Instant::now() - Duration::from_secs(10),
             displays_dirty: true,
             output_open: false,
@@ -1095,7 +1098,8 @@ impl MonitorApp {
         if !self.output_open {
             return;
         }
-        if self.output_snapshot.lock().take_close_request() {
+        let close_requested = self.output_snapshot.lock().take_close_request();
+        if close_requested {
             self.stop_output(ctx);
             return;
         }
@@ -1365,17 +1369,29 @@ impl eframe::App for MonitorApp {
         let ctx = ui.ctx().clone();
         let got_frame = self.last_got_frame;
 
+        // The operator display can change when the window is moved; refresh
+        // the display list promptly so the clean feed never targets the
+        // display that holds the controls.
+        let outer_rect = ctx.input(|i| i.viewport().outer_rect);
+        if outer_rect != self.last_outer_rect {
+            self.last_outer_rect = outer_rect;
+            self.displays_dirty = true;
+        }
+
         // Displays are polled: winit 0.30 has no monitor hot-plug event.
         if self.displays_dirty || self.displays_refreshed_at.elapsed() >= Duration::from_secs(2) {
             self.refresh_displays(frame);
         }
 
         // Escape / F11 fullscreen handling
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if esc_pressed {
             if self.preferences_open {
                 self.preferences_open = false;
             } else if self.fullscreen {
                 self.exit_fullscreen(&ctx);
+            } else if self.output_open {
+                self.stop_output(&ctx);
             }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
