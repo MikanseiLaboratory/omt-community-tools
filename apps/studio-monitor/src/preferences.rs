@@ -322,6 +322,14 @@ pub fn show(
                             .color(chrome.accent),
                         );
                     }
+                    if let Some(error) = output_error {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(error.message(language))
+                                .small()
+                                .color(chrome.danger),
+                        );
+                    }
 
                     ui.add_space(8.0);
                     ui.label(
@@ -411,14 +419,6 @@ pub fn show(
                         false,
                     ) {
                         action = Some(PrefsAction::RefreshDisplays);
-                    }
-                    if let Some(error) = output_error {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(error.message(language))
-                                .small()
-                                .color(chrome.danger),
-                        );
                     }
                     ui.add_space(4.0);
                     ui.label(

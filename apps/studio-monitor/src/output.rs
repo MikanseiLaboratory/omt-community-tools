@@ -139,7 +139,13 @@ pub(crate) fn resolve_target(
 
         if let Some(index) = by_name.or(by_index) {
             if displays[index].is_operator {
-                return Err(OutputError::SameAsOperator);
+                // The saved display is now showing the operator window. Use
+                // another display instead of failing, so enabling the clean
+                // feed still works after a window move.
+                return displays
+                    .iter()
+                    .position(|display| !display.is_operator)
+                    .ok_or(OutputError::SameAsOperator);
             }
             return Ok(index);
         }
@@ -494,8 +500,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_operator_display() {
+    fn saved_operator_display_falls_back() {
         let displays = vec![display(0, true), display(1, false)];
+        let preferred = OutputDisplayRef {
+            index: 0,
+            name: None,
+        };
+        assert_eq!(resolve_target(&displays, Some(&preferred)), Ok(1));
+    }
+
+    #[test]
+    fn saved_operator_display_errors_without_alternative() {
+        let displays = vec![display(0, true)];
         let preferred = OutputDisplayRef {
             index: 0,
             name: None,
@@ -507,17 +523,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_operator_display_matched_by_name() {
+    fn saved_operator_display_matched_by_name_falls_back() {
         let mut displays = vec![display(0, true), display(1, false)];
         displays[0].name = Some("Built-in".into());
         let preferred = OutputDisplayRef {
             index: 1,
             name: Some("Built-in".into()),
         };
-        assert_eq!(
-            resolve_target(&displays, Some(&preferred)),
-            Err(OutputError::SameAsOperator)
-        );
+        assert_eq!(resolve_target(&displays, Some(&preferred)), Ok(1));
     }
 
     #[test]

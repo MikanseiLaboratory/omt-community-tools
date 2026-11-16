@@ -176,6 +176,8 @@ struct MonitorApp {
     displays_dirty: bool,
     /// Whether the clean-feed viewport should be shown.
     output_open: bool,
+    /// A start request waiting for a fresh display scan.
+    pending_output_start: bool,
     /// Resolved display index for the output window.
     output_monitor: Option<usize>,
     /// Display the output was started on, used to detect reordering / unplug.
@@ -326,6 +328,7 @@ impl MonitorApp {
             displays_refreshed_at: Instant::now() - Duration::from_secs(10),
             displays_dirty: true,
             output_open: false,
+            pending_output_start: false,
             output_monitor: None,
             output_target: None,
             output_error: None,
@@ -1030,6 +1033,11 @@ impl MonitorApp {
             self.settings.show_alpha = false;
             self.prep_ctrl.set_alpha(false);
         }
+        // Keep the controls above other windows while the clean feed is live,
+        // so the operator cannot be locked out by another app's window.
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::AlwaysOnTop,
+        ));
         ctx.request_repaint();
         true
     }
@@ -1049,6 +1057,10 @@ impl MonitorApp {
         // The output viewport hid the OS cursor while it was alive; make sure
         // the operator window asks for it back.
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        // The operator window was kept on top while the clean feed ran.
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::Normal,
+        ));
         ctx.request_repaint();
     }
 
@@ -1062,10 +1074,9 @@ impl MonitorApp {
             self.stop_output(ctx);
             return;
         }
-        if !self.start_output(ctx) {
-            self.displays_dirty = true;
-            self.open_preferences();
-        }
+        // Defer the start until the end of the frame, after a fresh display
+        // scan: a just-moved operator window must not be selected as output.
+        self.pending_output_start = true;
     }
 
     /// Apply a new output display choice, moving a running output window.
@@ -1255,9 +1266,7 @@ impl MonitorApp {
             PrefsAction::SetVu(v) => self.settings.vu_meter = v,
             PrefsAction::SetOutputEnabled(enabled) => {
                 if enabled {
-                    if !self.start_output(ctx) {
-                        self.displays_dirty = true;
-                    }
+                    self.pending_output_start = true;
                 } else {
                     self.stop_output(ctx);
                 }
@@ -1448,6 +1457,17 @@ impl eframe::App for MonitorApp {
         // Keep the output viewport registered even while the operator window
         // is minimized: eframe runs the root UI while a visible child exists.
         self.sync_output(&ctx);
+
+        // A start request is resolved after a fresh display scan so a window
+        // moved in this frame cannot be selected as the output display.
+        if self.pending_output_start {
+            self.pending_output_start = false;
+            self.refresh_displays(frame);
+            if !self.start_output(&ctx) {
+                self.displays_dirty = true;
+                self.preferences_open = true;
+            }
+        }
 
         // Reclaim the operator window after the clean feed viewport appears or
         // disappears. `Focus` brings the root window to the front on desktop.
