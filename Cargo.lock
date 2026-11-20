@@ -6207,9 +6207,9 @@ dependencies = [
 
 [[package]]
 name = "openmediatransport"
-version = "0.2.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eb79d02ccdacb6ccba8bb0206f727a98019fd25a87e7c66a38e19cfda7ae8d8"
+checksum = "e335316b045741ec923951584c777a39fc2decfde4e0c6494a3c4da9d429dfb6"
 dependencies = [
  "bytes",
  "libc",

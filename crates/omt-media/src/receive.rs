@@ -829,6 +829,7 @@ async fn open_receiver(
             connect_timeout: Duration::from_secs(5),
             auto_reconnect: true,
             gpu,
+            ..ReceiverConfig::default()
         };
         ReceiverSession::connect_with_addresses(url, &addresses, config)
     })
