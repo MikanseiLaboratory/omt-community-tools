@@ -6207,11 +6207,12 @@ dependencies = [
 
 [[package]]
 name = "openmediatransport"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e335316b045741ec923951584c777a39fc2decfde4e0c6494a3c4da9d429dfb6"
+checksum = "6030b32068e113b04cc5d326972f06fddf45350cfd8b5a37809a162901b0bb4a"
 dependencies = [
  "bytes",
+ "if-addrs",
  "libc",
  "mdns-sd",
  "roxmltree 0.21.1",

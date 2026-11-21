@@ -3,7 +3,7 @@
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
-use openmediatransport::{Discovery, OmtError};
+use openmediatransport::{Discovery, OmtAddress, OmtError};
 
 use crate::runtime;
 
@@ -128,10 +128,66 @@ pub fn local_name_collision(
     sources: &[DiscoveredSource],
     is_live: impl Fn(&DiscoveredSource) -> bool,
 ) -> Option<DiscoveredSource> {
+    let local = local_identity(desired);
+    collision_with(sources, local.as_ref(), is_live)
+}
+
+/// Collision check against an explicit local identity (test seam).
+fn collision_with(
+    sources: &[DiscoveredSource],
+    local: Option<&OmtAddress>,
+    is_live: impl Fn(&DiscoveredSource) -> bool,
+) -> Option<DiscoveredSource> {
+    let local = local?;
     sources
         .iter()
-        .find(|src| is_this_machine(&src.host) && src.source == desired && is_live(src))
+        // Compare the advertised name, not the raw setting: a long source
+        // name is truncated to fit the 63-byte DNS-SD instance label.
+        .find(|src| src.source == local.name && source_is_local(src, local) && is_live(src))
         .cloned()
+}
+
+/// This machine's identity as a sender would advertise it for `source_name`.
+///
+/// Built with the same [`OmtAddress::local`] the sender uses, so the machine
+/// label — including its DNS-SD length truncation — matches what peers
+/// discover.
+fn local_identity(source_name: &str) -> Option<OmtAddress> {
+    OmtAddress::local(source_name, 0).ok()
+}
+
+/// Whether `source` is advertised by this machine.
+///
+/// Two independent signals, because neither is reliable on its own:
+///
+/// - Addresses: a local sender advertises one of this machine's non-loopback
+///   interface addresses. Loopback is never a locality signal: it identifies
+///   whichever machine is listening, not the sender, so an entry that lists
+///   `127.0.0.1` must not be classified as local by that address.
+/// - Machine name: compared with the same `gethostname` value the sender
+///   advertises. `LOCALHOST` is never treated as an identity — it is a
+///   loopback alias every machine can report, so a remote sender may use it
+///   too. A sender named `LOCALHOST` is still recognized through its
+///   addresses.
+fn source_is_local(source: &DiscoveredSource, local: &OmtAddress) -> bool {
+    let by_address = source.addresses.iter().any(|addr| {
+        !is_loopback(addr)
+            && local
+                .addresses
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(addr))
+    });
+    if by_address {
+        return true;
+    }
+    let machine = local.machine_name.trim();
+    !machine.is_empty()
+        && !machine.eq_ignore_ascii_case("LOCALHOST")
+        && source.host.trim().eq_ignore_ascii_case(machine)
+}
+
+fn is_loopback(address: &str) -> bool {
+    address.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Whether the advertised sender still accepts TCP connections.
@@ -156,29 +212,6 @@ fn source_is_live(source: &DiscoveredSource) -> bool {
     })
 }
 
-fn is_this_machine(host: &str) -> bool {
-    let host = host.trim();
-    if host.is_empty() {
-        return false;
-    }
-    let upper = host.to_ascii_uppercase();
-    this_machine_labels().iter().any(|label| label == &upper)
-}
-
-fn this_machine_labels() -> Vec<String> {
-    let mut labels = Vec::new();
-    for key in ["COMPUTERNAME", "HOSTNAME"] {
-        if let Ok(value) = std::env::var(key) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                labels.push(trimmed.to_ascii_uppercase());
-            }
-        }
-    }
-    labels.push("LOCALHOST".into());
-    labels
-}
-
 /// Spawn discovery and deliver the result on a std mpsc channel (UI-friendly).
 pub fn spawn_discover(
     wait: Duration,
@@ -197,17 +230,25 @@ pub fn spawn_discover(
 
 #[cfg(test)]
 mod tests {
-    use super::{DiscoveredSource, local_name_collision, split_host_source};
+    use super::{DiscoveredSource, collision_with, source_is_local, split_host_source};
+    use openmediatransport::OmtAddress;
 
-    fn source(host: &str, name: &str, port: u16) -> DiscoveredSource {
+    fn source(host: &str, name: &str, port: u16, addresses: &[&str]) -> DiscoveredSource {
         DiscoveredSource {
             name: format!("{host} ({name})"),
             host: host.into(),
             source: name.into(),
             url: format!("omt://{host}:{port}/{name}"),
             port,
-            addresses: vec!["127.0.0.1".into()],
+            addresses: addresses.iter().map(|a| (*a).into()).collect(),
         }
+    }
+
+    fn local(machine: &str, addresses: &[&str]) -> OmtAddress {
+        let mut address = OmtAddress::new("Test Pattern", 0);
+        address.machine_name = machine.into();
+        address.addresses = addresses.iter().map(|a| (*a).into()).collect();
+        address
     }
 
     #[test]
@@ -218,19 +259,63 @@ mod tests {
     }
 
     #[test]
+    fn remote_localhost_is_not_this_machine() {
+        // A remote sender advertising the `LOCALHOST` fallback must not be
+        // mistaken for this machine: that made Test Patterns refuse to start
+        // when a same-named source existed anywhere on the LAN.
+        let remote = source("LOCALHOST", "Test Pattern", 6401, &["192.0.2.10"]);
+        let local = local("MYMAC.LOCAL", &["192.0.2.5", "127.0.0.1"]);
+        assert!(!source_is_local(&remote, &local));
+    }
+
+    #[test]
+    fn local_sender_is_recognized_by_address() {
+        // A local sender whose machine name is the `LOCALHOST` fallback is
+        // still local: it advertises this machine's interface address.
+        let sender = source(
+            "LOCALHOST",
+            "Test Pattern",
+            6401,
+            &["192.0.2.5", "127.0.0.1"],
+        );
+        let local = local("LOCALHOST", &["192.0.2.5", "127.0.0.1"]);
+        assert!(source_is_local(&sender, &local));
+    }
+
+    #[test]
+    fn local_sender_is_recognized_by_machine_name_without_addresses() {
+        // macOS Finder launches have no `HOSTNAME`; the advertised machine
+        // name still identifies this machine.
+        let sender = source("MYMAC.LOCAL", "Test Pattern", 6401, &[]);
+        let local = local("MYMAC.LOCAL", &["192.0.2.5"]);
+        assert!(source_is_local(&sender, &local));
+    }
+
+    #[test]
+    fn localhost_fallback_name_alone_is_not_identity() {
+        let sender = source("LOCALHOST", "Test Pattern", 6401, &[]);
+        let local = local("LOCALHOST", &["192.0.2.5", "127.0.0.1"]);
+        assert!(!source_is_local(&sender, &local));
+    }
+
+    #[test]
     fn collision_only_matches_live_local_sources() {
+        let local = local("MYMAC.LOCAL", &["192.0.2.5", "127.0.0.1"]);
         let sources = vec![
-            source("LOCALHOST", "Test Pattern", 6401),
-            source("REMOTE", "Test Pattern", 6402),
+            source("LOCALHOST", "Test Pattern", 6401, &["192.0.2.5"]),
+            source("REMOTE", "Test Pattern", 6402, &["192.0.2.10"]),
         ];
         let live_local = |src: &DiscoveredSource| src.host == "LOCALHOST";
         assert_eq!(
-            local_name_collision("Test Pattern", &sources, live_local)
+            collision_with(&sources, Some(&local), live_local)
                 .expect("local collision")
                 .port,
             6401
         );
-        assert!(local_name_collision("Test Pattern 2", &sources, live_local).is_none());
-        assert!(local_name_collision("Test Pattern", &sources, |_| false).is_none());
+        assert!(collision_with(&sources, Some(&local), |_| false).is_none());
+
+        let mut other_name = local.clone();
+        other_name.name = "Test Pattern 2".into();
+        assert!(collision_with(&sources, Some(&other_name), live_local).is_none());
     }
 }
